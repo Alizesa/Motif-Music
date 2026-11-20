@@ -1,0 +1,112 @@
+name: Motif CI
+
+on:
+  push:
+    branches: [master, develop, 'test-*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: motif-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Analyze and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Verify generated database code
+        run: |
+          dart run build_runner build
+          dart run drift_dev schema dump lib/library/data/library_database.dart drift_schemas/library
+          git diff --exit-code -- lib/library/data/library_database.g.dart drift_schemas/library
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Prepare stable Android test signing
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-')
+        env:
+          MOTIF_TEST_KEYSTORE_BASE64: ${{ secrets.MOTIF_TEST_KEYSTORE_BASE64 }}
+        run: python3 tool/prepare_test_signing.py
+
+      - name: Build release APK
+        env:
+          MOTIF_REQUIRE_TEST_SIGNING: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') }}
+          MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
+          MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
+          MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
+        run: flutter build apk --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: motif-android-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows release
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      - name: Test native TagLib on Windows
+        run: flutter test test/library/taglib_native_test.dart --reporter expanded
+
+      - name: Build release
+        run: flutter build windows --release
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: motif-windows-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error

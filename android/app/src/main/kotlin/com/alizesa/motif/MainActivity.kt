@@ -1,0 +1,21 @@
+package com.alizesa.motif
+
+import com.alizesa.motif.library.SafLibraryScanner
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+
+class MainActivity : FlutterActivity() {
+    private var libraryScanner: SafLibraryScanner? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        libraryScanner?.close()
+        libraryScanner = SafLibraryScanner(this, flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    override fun onDestroy() {
+        libraryScanner?.close()
+        libraryScanner = null
+        super.onDestroy()
+    }
+}

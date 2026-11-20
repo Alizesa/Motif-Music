@@ -1,0 +1,14 @@
+name: motif_taglib
+description: Private read-only TagLib FFI bridge for Motif.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.14.0
+dependencies:
+  archive: ^4.0.7
+  code_assets: ^2.2.0
+  crypto: ^3.0.7
+  ffi: ^2.1.4
+  hooks: ^2.0.0
+  logging: ^1.3.0
+  native_toolchain_c: ^0.19.6

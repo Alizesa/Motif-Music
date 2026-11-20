@@ -1,0 +1,69 @@
+-- Schema v1. Audio data, artwork and expiring online URLs never belong here.
+CREATE TABLE library_roots (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL CHECK (platform IN ('windows', 'android')),
+  location_key TEXT NOT NULL CHECK (length(location_key) > 0),
+  locator TEXT NOT NULL CHECK (length(locator) > 0),
+  display_name TEXT NOT NULL,
+  is_accessible INTEGER NOT NULL DEFAULT 1 CHECK (is_accessible IN (0, 1)),
+  scan_generation INTEGER NOT NULL DEFAULT 0,
+  active_generation INTEGER,
+  last_scan_state TEXT NOT NULL DEFAULT 'never'
+    CHECK (last_scan_state IN ('never', 'running', 'complete', 'failed', 'interrupted')),
+  last_completed_ms INTEGER,
+  UNIQUE (platform, location_key)
+);
+
+CREATE TABLE local_tracks (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL CHECK (platform IN ('windows', 'android')),
+  location_key TEXT NOT NULL CHECK (length(location_key) > 0),
+  locator TEXT NOT NULL CHECK (length(locator) > 0),
+  file_name TEXT NOT NULL,
+  size_bytes INTEGER CHECK (size_bytes >= 0),
+  modified_ms INTEGER,
+  title TEXT NOT NULL DEFAULT '',
+  artist TEXT NOT NULL DEFAULT '',
+  album TEXT NOT NULL DEFAULT '',
+  title_key TEXT NOT NULL DEFAULT '',
+  artist_key TEXT NOT NULL DEFAULT '',
+  album_key TEXT NOT NULL DEFAULT '',
+  duration_ms INTEGER CHECK (duration_ms > 0),
+  container TEXT,
+  codec TEXT,
+  metadata_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (metadata_state IN ('pending', 'ready', 'failed')),
+  normalization_version INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1,
+  is_present INTEGER NOT NULL DEFAULT 1 CHECK (is_present IN (0, 1)),
+  UNIQUE (platform, location_key)
+);
+
+-- A file can belong to overlapping user-selected directories without duplicates.
+CREATE TABLE root_files (
+  root_id INTEGER NOT NULL REFERENCES library_roots(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES local_tracks(id) ON DELETE CASCADE,
+  seen_generation INTEGER NOT NULL,
+  file_locator TEXT NOT NULL CHECK (length(file_locator) > 0),
+  PRIMARY KEY (root_id, file_id)
+) WITHOUT ROWID;
+CREATE INDEX root_files_by_file ON root_files(file_id, root_id);
+
+-- Candidate lookup and browsing have separate access paths.
+CREATE INDEX tracks_match_title_duration
+  ON local_tracks(normalization_version, title_key, duration_ms, id)
+  WHERE is_present = 1 AND metadata_state = 'ready' AND title_key <> '';
+CREATE INDEX tracks_present_page ON local_tracks(id) WHERE is_present = 1;
+
+-- Only a final association is persisted, not every speculative candidate pair.
+CREATE TABLE source_track_links (
+  source TEXT NOT NULL CHECK (length(source) > 0),
+  source_track_id TEXT NOT NULL CHECK (length(source_track_id) > 0),
+  file_id INTEGER NOT NULL REFERENCES local_tracks(id) ON DELETE RESTRICT,
+  file_revision INTEGER NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('manual', 'automatic')),
+  matcher_version INTEGER NOT NULL CHECK (matcher_version > 0),
+  confirmed_ms INTEGER NOT NULL,
+  PRIMARY KEY (source, source_track_id)
+) WITHOUT ROWID;
+CREATE INDEX source_links_by_file ON source_track_links(file_id);
