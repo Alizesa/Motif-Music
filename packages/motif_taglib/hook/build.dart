@@ -136,6 +136,8 @@ void main(List<String> args) async {
     ).build(
       input: input,
       output: output,
+      // This is the final runtime library; the package has no link hook.
+      routing: const [ToAppBundle()],
       linkModePreference: LinkModePreference.dynamic,
     );
   });
