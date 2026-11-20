@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:mpv_audio_kit/mpv_audio_kit.dart';
 
 import 'audio_engine.dart';
@@ -8,18 +6,19 @@ import 'audio_engine.dart';
 /// Keep this adapter isolated so the native binding can be replaced if device
 /// validation shows platform-specific limitations.
 final class MpvAudioEngine implements AudioEngine {
-  MpvAudioEngine()
-    : _player = Player(
-        configuration: const PlayerConfiguration(
-          autoPlay: false,
-          initialVolume: 75.0,
-          resumePlayback: false,
-        ),
-      );
+  MpvAudioEngine({PlayerApi? player})
+    : _player =
+          player ??
+          Player(
+            configuration: const PlayerConfiguration(
+              autoPlay: false,
+              initialVolume: 75.0,
+              resumePlayback: false,
+            ),
+          );
 
-  final Player _player;
+  final PlayerApi _player;
   final List<double> _equalizerGains = List<double>.filled(10, 0);
-  double _preampDb = 0;
 
   @override
   Stream<bool> get playWhenReady => _player.stream.playWhenReady;
@@ -102,11 +101,11 @@ final class MpvAudioEngine implements AudioEngine {
 
   @override
   Future<void> setPreamp(double gainDb) async {
-    if (gainDb < -12 || gainDb > 12) {
+    if (!gainDb.isFinite || gainDb < -12 || gainDb > 12) {
       throw RangeError.range(gainDb, -12, 12, 'gainDb');
     }
-    _preampDb = gainDb;
-    await _applyAudioEffects();
+    // Native dB gain stays independent of the EQ filter chain.
+    await _player.setVolumeGain(gainDb);
   }
 
   Future<void> _applyAudioEffects() async {
@@ -121,15 +120,6 @@ final class MpvAudioEngine implements AudioEngine {
         ),
     ];
 
-    if (_preampDb.abs() > 0.001) {
-      final linearGain = math.pow(10, _preampDb / 20).toDouble();
-      effects.insert(
-        0,
-        RawAudioEffect(
-          'lavfi-volume=volume=${linearGain.toStringAsPrecision(7)}',
-        ),
-      );
-    }
     await _player.setAudioEffects(effects);
   }
 
