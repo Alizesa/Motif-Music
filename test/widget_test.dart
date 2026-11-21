@@ -143,7 +143,8 @@ void main() {
       await tester.ensureVisible(
         find.byKey(const ValueKey('quality-highestLocal')),
       );
-      await tester.tap(find.text('本地最高音质'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('quality-highestLocal')));
       await tester.pumpAndSettle();
       expect(
         await library.playbackQualitySettings.loadMode(),

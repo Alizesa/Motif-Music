@@ -109,8 +109,11 @@ jobs:
       - name: Test native TagLib on Windows
         run: flutter test test/library/taglib_native_test.dart --reporter expanded
 
+      - name: Prepare Windows WebView C++ compatibility
+        run: python tool/patch_windows_webview.py
+
       - name: Build release
-        run: flutter build windows --release
+        run: flutter build windows --release --no-pub
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7

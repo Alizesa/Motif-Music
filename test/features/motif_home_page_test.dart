@@ -15,6 +15,19 @@ import '../online/online_fakes.dart';
 import '../online/playback_fakes.dart';
 import '../support/library_fixtures.dart';
 
+Future<void> _withTargetPlatform(
+  TargetPlatform platform,
+  Future<void> Function() body,
+) async {
+  final previous = debugDefaultTargetPlatformOverride;
+  debugDefaultTargetPlatformOverride = platform;
+  try {
+    await body();
+  } finally {
+    debugDefaultTargetPlatformOverride = previous;
+  }
+}
+
 void main() {
   late FakeLibrarySource source;
   late LibraryController library;
@@ -79,33 +92,41 @@ void main() {
   }
 
   testWidgets('Android shows the bottom Home/My navigation', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    await pumpHome(tester);
+    await _withTargetPlatform(TargetPlatform.android, () async {
+      await pumpHome(tester);
 
-    expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.byType(NavigationRail), findsNothing);
-    expect(find.text('每日推荐'), findsOneWidget);
-    expect(find.text('个性化歌单'), findsOneWidget);
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byType(NavigationRail), findsNothing);
+      expect(find.text('每日推荐'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('个性化歌单'),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('个性化歌单'), findsOneWidget);
 
-    await tester.tap(find.text('我的').last);
-    await tester.pumpAndSettle();
-    expect(find.text('QQ 音乐账号'), findsOneWidget);
-    expect(find.byKey(const Key('my-local-library')), findsOneWidget);
+      await tester.tap(find.text('我的').last);
+      await tester.pumpAndSettle();
+      expect(find.text('QQ 音乐账号'), findsOneWidget);
+      expect(find.byKey(const Key('my-local-library')), findsOneWidget);
+    });
   });
 
   testWidgets('Windows shows the left Home/My navigation', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-    tester.view.physicalSize = const Size(1280, 900);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(() {
-      tester.view.resetPhysicalSize();
-      tester.view.resetDevicePixelRatio();
-    });
-    await pumpHome(tester);
+    await _withTargetPlatform(TargetPlatform.windows, () async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await pumpHome(tester);
 
-    expect(find.byType(NavigationRail), findsOneWidget);
-    expect(find.byType(NavigationBar), findsNothing);
-    expect(find.text('我的'), findsOneWidget);
+      expect(find.byType(NavigationRail), findsOneWidget);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.text('我的'), findsOneWidget);
+    });
   });
 
   testWidgets('QQ search exposes loading and real result states', (
@@ -123,7 +144,13 @@ void main() {
     response.complete(searchResponse());
     await tester.pumpAndSettle();
     expect(find.text('搜索结果来自 QQ 音乐'), findsNothing);
-    expect(find.text('Song'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('qq-search-results')),
+        matching: find.text('Song'),
+      ),
+      findsOneWidget,
+    );
     expect(find.text('Artist · Album'), findsOneWidget);
   });
 
@@ -240,6 +267,7 @@ void main() {
     await tester.tap(find.byKey(const Key('qq-search-submit')));
     await tester.pump();
     await tester.enterText(find.byKey(const Key('qq-search-input')), 'New');
+    await tester.pump();
     await tester.tap(find.byKey(const Key('qq-search-submit')));
     await tester.pump();
     old.complete(
@@ -272,26 +300,30 @@ void main() {
   testWidgets('narrow large-text navigation and the carousel remain usable', (
     tester,
   ) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    tester.view.physicalSize = const Size(360, 760);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(() {
-      tester.view.resetPhysicalSize();
-      tester.view.resetDevicePixelRatio();
+    await _withTargetPlatform(TargetPlatform.android, () async {
+      tester.view.physicalSize = const Size(360, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await pumpHome(tester, scaler: const TextScaler.linear(1.8));
+      await tester.drag(
+        find.byKey(const Key('home-featured-carousel')),
+        const Offset(-280, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('猜你喜欢'), findsOneWidget);
+      await tester.tap(find.text('我的').last);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('my-settings')));
+      await tester.tap(find.byKey(const Key('my-settings')));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const Key('settings-source-management')),
+        findsOneWidget,
+      );
     });
-    await pumpHome(tester, scaler: const TextScaler.linear(1.8));
-    await tester.drag(
-      find.byKey(const Key('home-featured-carousel')),
-      const Offset(-280, 0),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('猜你喜欢'), findsOneWidget);
-    await tester.tap(find.text('我的').last);
-    await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const Key('my-settings')));
-    await tester.tap(find.byKey(const Key('my-settings')));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(find.byKey(const Key('settings-source-management')), findsOneWidget);
   });
 }
