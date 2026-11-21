@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../settings/playback_quality_repository.dart';
 import '../domain/audio_quality.dart';
+import '../domain/library_playback_error.dart';
 import '../domain/local_playback_matcher.dart';
 import '../data/library_database.dart';
 import '../data/library_repository.dart';
@@ -101,6 +102,10 @@ final class LibraryController extends ChangeNotifier {
     required TrackMetadata track,
     AudioQuality? onlineQuality,
   }) async {
+    await initialize();
+    if (!_initialized) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+    }
     if (_closed) throw StateError('曲库已关闭');
     final mode = await playbackQualitySettings.loadMode();
     if (_closed) throw StateError('曲库已关闭');
@@ -220,6 +225,63 @@ final class LibraryController extends ChangeNotifier {
     if (_closed) return;
     await _whileOpen(play(current));
   }, reload: false);
+
+  /// Recheck the exact matching revision and locator without locking metadata
+  /// work or treating an unavailable index as an absent local version.
+  Future<LocalAudioFile> preparePlaybackFile(LocalAudioFile expected) async {
+    if (_closed || !_initialized) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+    }
+    if (isBusy) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.busy);
+    }
+    final current = await _repository.fileById(expected.id);
+    if (_closed) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+    }
+    if (isBusy) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.busy);
+    }
+    if (current != null && current.revision != expected.revision) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.changed);
+    }
+    if (current == null) {
+      throw const LibraryPlaybackException(
+        LibraryPlaybackErrorKind.unavailable,
+      );
+    }
+    try {
+      await _whileOpen(_verifyFile(current.location));
+    } catch (_) {
+      if (_closed) {
+        throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+      }
+      throw const LibraryPlaybackException(
+        LibraryPlaybackErrorKind.unavailable,
+      );
+    }
+    if (_closed) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+    }
+    if (isBusy) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.busy);
+    }
+    final verified = await _repository.fileById(expected.id);
+    if (_closed) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.notReady);
+    }
+    if (verified != null &&
+        (verified.revision != current.revision ||
+            verified.location.locator != current.location.locator)) {
+      throw const LibraryPlaybackException(LibraryPlaybackErrorKind.changed);
+    }
+    if (verified == null) {
+      throw const LibraryPlaybackException(
+        LibraryPlaybackErrorKind.unavailable,
+      );
+    }
+    return verified;
+  }
 
   Future<bool> _run(
     String failure,

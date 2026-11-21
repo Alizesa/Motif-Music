@@ -62,37 +62,78 @@ class FakeLibrarySource implements LibraryPlatformSource {
   }
 }
 
-class FakeAudioEngine implements AudioEngine {
+class FakeAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
   final _errors = StreamController<String>.broadcast();
   final _queue = StreamController<AudioQueueSnapshot>.broadcast();
+  final _completed = StreamController<bool>.broadcast();
+  final _playing = StreamController<bool>.broadcast();
+  final _navigation = StreamController<AudioQueueNavigation>.broadcast();
+  bool applicationNavigation = false;
+  bool _isPlaying = false;
   List<AudioTrack> opened = [];
   int disposeCount = 0;
+  int openCount = 0;
+  int playCount = 0;
+  int pauseCount = 0;
   Object? openError;
   Future<void>? openWait;
 
   void reportError(String message) => _errors.add(message);
+  void requestNavigation(AudioQueueNavigation command) =>
+      _navigation.add(command);
   @override
-  Stream<bool> get playWhenReady => Stream<bool>.value(false);
+  Stream<AudioQueueNavigation> get navigationRequests => _navigation.stream;
+  @override
+  void useApplicationQueueNavigation(bool enabled) =>
+      applicationNavigation = enabled;
+  void completeTrack() {
+    _isPlaying = false;
+    _playing.add(false);
+    _completed.add(true);
+  }
+
+  @override
+  Stream<bool> get playWhenReady async* {
+    yield _isPlaying;
+    yield* _playing.stream;
+  }
+
   @override
   Stream<Duration> get position => Stream<Duration>.value(Duration.zero);
   @override
   Stream<Duration> get duration => Stream<Duration>.value(Duration.zero);
+  @override
+  Stream<bool> get completed => _completed.stream;
   @override
   Stream<AudioQueueSnapshot> get queue => _queue.stream;
   @override
   Stream<String> get errors => _errors.stream;
   @override
   Future<void> openQueue(List<AudioTrack> tracks) async {
+    openCount++;
     if (openError case final error?) throw error;
     if (openWait case final pending?) await pending;
     opened = List.of(tracks);
+    _completed.add(false);
+    _isPlaying = true;
+    _playing.add(true);
     _queue.add(AudioQueueSnapshot(tracks: opened, currentIndex: 0));
   }
 
   @override
-  Future<void> play() async {}
+  Future<void> play() async {
+    playCount++;
+    _isPlaying = true;
+    _playing.add(true);
+  }
+
   @override
-  Future<void> pause() async {}
+  Future<void> pause() async {
+    pauseCount++;
+    _isPlaying = false;
+    _playing.add(false);
+  }
+
   @override
   Future<bool> next() async => false;
   @override
@@ -110,6 +151,9 @@ class FakeAudioEngine implements AudioEngine {
     if (disposeCount++ > 0) return;
     await _errors.close();
     await _queue.close();
+    await _completed.close();
+    await _playing.close();
+    await _navigation.close();
   }
 }
 

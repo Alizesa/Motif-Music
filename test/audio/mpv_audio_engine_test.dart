@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mpv_audio_kit/mpv_audio_kit.dart';
 
 import 'package:motif/audio/mpv_audio_engine.dart';
+import 'package:motif/audio/audio_engine.dart';
 
 void main() {
   late RecordingPlayer player;
@@ -101,6 +102,39 @@ void main() {
       expect(player.effectsWrites, isEmpty);
     },
   );
+
+  test(
+    'application navigation is opt-in and publishes catalog metadata',
+    () async {
+      const track = AudioTrack(
+        uri: 'https://audio.example/song.mp3',
+        title: 'Song',
+        artist: 'Artist',
+        album: 'Album',
+      );
+      engine.useApplicationQueueNavigation(true);
+      await engine.openQueue([track]);
+      expect(player.sessions.single.autoApplyPlaylistNavigation, isFalse);
+      expect(player.opened.single.extras, {
+        'title': 'Song',
+        'artist': 'Artist',
+        'album': 'Album',
+      });
+      engine.useApplicationQueueNavigation(false);
+      await engine.openQueue([track]);
+      expect(player.sessions.last.autoApplyPlaylistNavigation, isTrue);
+    },
+  );
+
+  test(
+    'only native next and previous commands enter queue navigation',
+    () async {
+      expect(await engine.navigationRequests.toList(), [
+        AudioQueueNavigation.next,
+        AudioQueueNavigation.previous,
+      ]);
+    },
+  );
 }
 
 final class RecordingPlayer implements PlayerApi {
@@ -108,6 +142,11 @@ final class RecordingPlayer implements PlayerApi {
   final volumeWrites = <double>[];
   final effectsWrites = <List<AudioEffect>>[];
   Object? gainError;
+  final sessions = <MediaSession>[];
+  List<Media> opened = [];
+
+  @override
+  PlayerStream get stream => RecordingPlayerStream();
 
   @override
   Future<void> setVolumeGain(double gainDb) async {
@@ -122,6 +161,35 @@ final class RecordingPlayer implements PlayerApi {
   Future<void> setAudioEffects(List<AudioEffect> effects) async {
     effectsWrites.add(List<AudioEffect>.unmodifiable(effects));
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    if (invocation.memberName == #setTlsVerify ||
+        invocation.memberName == #setPrefetchPlaylist) {
+      return Future<void>.value();
+    }
+    if (invocation.memberName == #setMediaSession) {
+      sessions.add(invocation.positionalArguments.single as MediaSession);
+      return Future<void>.value();
+    }
+    if (invocation.memberName == #openAll) {
+      opened = (invocation.positionalArguments.first as Iterable)
+          .cast<Media>()
+          .toList();
+      return Future<void>.value();
+    }
+    throw UnimplementedError('${invocation.memberName}');
+  }
+}
+
+class RecordingPlayerStream implements PlayerStream {
+  @override
+  Stream<MediaSessionCommand> get mediaSessionCommands => Stream.fromIterable([
+    MediaSessionCommand.play,
+    MediaSessionCommand.next,
+    MediaSessionCommand.previous,
+    MediaSessionCommand.stop,
+  ]);
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>

@@ -2,10 +2,17 @@ import 'package:flutter/foundation.dart';
 
 @immutable
 class AudioTrack {
-  const AudioTrack({required this.uri, required this.title});
+  const AudioTrack({
+    required this.uri,
+    required this.title,
+    this.artist,
+    this.album,
+  });
 
   final String uri;
   final String title;
+  final String? artist;
+  final String? album;
 }
 
 @immutable
@@ -27,6 +34,7 @@ abstract interface class AudioEngine {
   Stream<bool> get playWhenReady;
   Stream<Duration> get position;
   Stream<Duration> get duration;
+  Stream<bool> get completed;
   Stream<AudioQueueSnapshot> get queue;
   Stream<String> get errors;
 
@@ -40,4 +48,12 @@ abstract interface class AudioEngine {
   Future<void> setEqualizer(List<double> gainsDb);
   Future<void> setPreamp(double gainDb);
   Future<void> dispose();
+}
+
+enum AudioQueueNavigation { next, previous }
+
+/// Optional bridge for native media keys when the application owns the queue.
+abstract interface class ApplicationQueueAudioEngine {
+  Stream<AudioQueueNavigation> get navigationRequests;
+  void useApplicationQueueNavigation(bool enabled);
 }

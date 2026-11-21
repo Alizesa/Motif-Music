@@ -1,0 +1,231 @@
+import 'dart:typed_data';
+
+import 'qq_auth_error.dart';
+import 'qq_credential.dart';
+
+enum QqQrMethod { qq, wechat }
+
+enum QqQrStatus { waitingScan, waitingConfirm, expired, failed, success }
+
+class QqQrChallenge {
+  const QqQrChallenge({
+    required this.key,
+    required this.image,
+    required this.method,
+    this.cookie = '',
+    this.verificationCookie = '',
+  });
+  final String key;
+  final Uint8List image;
+  final QqQrMethod method;
+  final String cookie;
+  final String verificationCookie;
+  String get scanMessage => method == QqQrMethod.qq ? '使用手机 QQ 扫码' : '使用微信扫码';
+  QqQrChallenge withCookies(String cookie, {String? verificationCookie}) =>
+      QqQrChallenge(
+        key: key,
+        image: image,
+        method: method,
+        cookie: cookie,
+        verificationCookie: verificationCookie ?? this.verificationCookie,
+      );
+  @override
+  String toString() => 'QqQrChallenge(redacted)';
+}
+
+class QqQrResult {
+  const QqQrResult({
+    required this.status,
+    required this.challenge,
+    this.credential,
+  });
+  final QqQrStatus status;
+  final QqQrChallenge challenge;
+  final QqCredential? credential;
+}
+
+class QqSecurityChallenge {
+  const QqSecurityChallenge({required this.uri, required this.cookie});
+  final Uri uri;
+  final String cookie;
+  @override
+  String toString() => 'QqSecurityChallenge(redacted)';
+}
+
+class QqVerificationRequired implements Exception {
+  const QqVerificationRequired(this.challenge);
+  final QqSecurityChallenge challenge;
+  @override
+  String toString() => '请完成 QQ 音乐安全验证。';
+}
+
+class QqVerificationResult {
+  const QqVerificationResult({required this.cookie});
+  final String cookie;
+  @override
+  String toString() => 'QqVerificationResult(redacted)';
+}
+
+typedef QqVerify = Future<QqVerificationResult?> Function(
+  QqSecurityChallenge challenge,
+);
+
+Map<String, Object?> qqAndroidLoginComm(
+  String deviceId, {
+  bool login = false,
+  int loginType = 0,
+}) => {
+  'ct': 11,
+  'cv': 14090008,
+  'v': 14090008,
+  'chid': '10003505',
+  'tmeAppID': 'qqmusic',
+  'tmeLoginMethod': 3,
+  'QIMEI': '',
+  'QIMEI36': '',
+  'OpenUDID': deviceId,
+  'OpenUDID2': deviceId,
+  'udid': deviceId,
+  'aid': deviceId,
+  'os_ver': '14',
+  'phonetype': 'Motif',
+  'devicelevel': '34',
+  'newdevicelevel': '34',
+  'rom': 'Motif',
+  if (login) 'tmeLoginType': loginType,
+};
+
+Map<String, Object?> qqPlaybackComm(QqCredential credential) => {
+  'ct': 11,
+  'cv': 14090008,
+  'v': 14090008,
+  'chid': '10003505',
+  'qq': credential.accountId,
+  'authst': credential.musicKey,
+  'tmeAppID': 'qqmusic',
+  'tmeLoginType': credential.loginType,
+  'format': 'json',
+};
+
+Map<String, Object?> qqPersonalizedComm(QqCredential credential) => {
+  'uin': credential.accountId,
+  'format': 'json',
+  'ct': 19,
+  'cv': 0,
+  'authst': credential.musicKey,
+};
+
+int qqQrToken(String value, {int seed = 0}) {
+  var result = seed;
+  for (final char in value.codeUnits) {
+    result = ((result * 33) + char) & 0x7fffffff;
+  }
+  return result;
+}
+
+(int, String) parseQqQrCallback(String text) {
+  if (text.length > 32768) {
+    throw const QqAuthException(QqAuthErrorKind.malformed);
+  }
+  final callback = RegExp(
+    r"ptuiCB\((.*?)\)\s*;?",
+    dotAll: true,
+  ).firstMatch(text);
+  if (callback == null) throw const QqAuthException(QqAuthErrorKind.malformed);
+  final args = RegExp(r"'((?:\\.|[^'\\])*)'")
+      .allMatches(callback.group(1)!)
+      .map(
+        (match) => match
+            .group(1)!
+            .replaceAll(r"\'", "'")
+            .replaceAll(r'\/', '/')
+            .replaceAll(r'\\', r'\'),
+      )
+      .toList();
+  final code = args.isEmpty ? null : int.tryParse(args.first);
+  if (code == null || args.length < 3) {
+    throw const QqAuthException(QqAuthErrorKind.malformed);
+  }
+  return (code, args[2]);
+}
+
+bool validQrImage(Uint8List bytes) =>
+    bytes.length >= 8 &&
+    bytes.length <= 524288 &&
+    ([
+          137,
+          80,
+          78,
+          71,
+          13,
+          10,
+          26,
+          10,
+        ].asMap().entries.every((entry) => bytes[entry.key] == entry.value) ||
+        (bytes[0] == 255 && bytes[1] == 216 && bytes[2] == 255) ||
+        (bytes[0] == 71 && bytes[1] == 73 && bytes[2] == 70));
+
+Uri requireQqRedirect(String value, Set<String> hosts, String path) {
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.port != 443 ||
+      uri.userInfo.isNotEmpty ||
+      !hosts.contains(uri.host) ||
+      uri.path != path) {
+    throw const QqAuthException(QqAuthErrorKind.rejected);
+  }
+  return uri;
+}
+
+String qqAuthorizationCode(String value, String expectedState) {
+  final uri = requireQqRedirect(value, {
+    'y.qq.com',
+  }, '/portal/wx_redirect.html');
+  final returned = uri.queryParameters['state'];
+  if (returned != null && returned != expectedState) {
+    throw const QqAuthException(QqAuthErrorKind.rejected);
+  }
+  final code = uri.queryParameters['code'];
+  if (code == null || code.isEmpty || code.length > 2048) {
+    throw const QqAuthException(QqAuthErrorKind.malformed);
+  }
+  return code;
+}
+
+bool isQqVerificationUri(Uri uri) =>
+    uri.scheme == 'https' &&
+    uri.port == 443 &&
+    uri.userInfo.isEmpty &&
+    !uri.hasFragment &&
+    (uri.host == 'qq.com' ||
+        uri.host.endsWith('.qq.com') ||
+        uri.host == 'qcloud.com' ||
+        uri.host.endsWith('.qcloud.com'));
+
+bool isQqVerificationClose(Uri uri) =>
+    uri.scheme == 'qqmusic' &&
+    uri.host == 'qq.com' &&
+    {
+      'closeWebView',
+      'closeWebview',
+      'finishWebView',
+    }.contains(uri.pathSegments.lastOrNull);
+
+void checkQqLoginResult(Map<String, Object?> result, String cookie) {
+  final code = result['code'] is int
+      ? result['code'] as int
+      : int.tryParse('${result['code']}');
+  if (code == null) throw const QqAuthException(QqAuthErrorKind.malformed);
+  if (code == 20276 && result['data'] is Map) {
+    final data = result['data'] as Map;
+    final value = data['securityURL'] ?? data['securityUrl'];
+    final uri = value is String ? Uri.tryParse(value) : null;
+    if (uri != null && isQqVerificationUri(uri)) {
+      throw QqVerificationRequired(
+        QqSecurityChallenge(uri: uri, cookie: cookie),
+      );
+    }
+  }
+  if (code != 0) throw qqLoginFailure(code);
+}

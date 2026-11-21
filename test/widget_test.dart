@@ -10,6 +10,10 @@ import 'package:motif/main.dart';
 import 'package:motif/settings/playback_quality_settings.dart';
 
 import 'support/library_fixtures.dart';
+import 'online/playback_fakes.dart';
+import 'online/qq_auth_fakes.dart';
+
+import 'package:motif/online/qq/auth/qq_session_manager.dart';
 
 void main() {
   late FakeLibrarySource source;
@@ -35,6 +39,8 @@ void main() {
       try {
         await tester.pumpWidget(
           MotifApp(
+            qqSessionFactory: () => QqSessionManager(vault: MemoryQqVault()),
+            onlinePreferencesStore: MemoryPlaybackPreferencesStore(),
             engineFactory: () {
               engineCreations++;
               return engine;
@@ -46,6 +52,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await tester.tap(find.text('我的').last);
+        await tester.pumpAndSettle();
         await body(tester);
       } finally {
         // Close in the same fake-async zone used by application callbacks.
@@ -56,28 +64,30 @@ void main() {
   }
 
   Future<void> openLibrary(WidgetTester tester) async {
-    await tester.tap(find.byKey(const Key('open-local-library')));
+    await tester.tap(find.byKey(const Key('my-local-library')));
     await tester.pumpAndSettle();
   }
 
   testAppWidgets(
-    'shows the existing player and shares its engine with the library route',
+    'Home/My and the catalog player share an engine with the library route',
     (tester) async {
-      expect(find.text('Motif'), findsOneWidget);
-      expect(find.text('播放器引擎验证'), findsOneWidget);
-      expect(find.text('选择音频'), findsOneWidget);
+      expect(find.byKey(const Key('my-local-library')), findsOneWidget);
       await openLibrary(tester);
       expect(find.text('本地曲库'), findsOneWidget);
       await library.addDirectory();
       await tester.pumpAndSettle();
       await tester.tap(find.text('track-1.flac'));
       await tester.pumpAndSettle();
-      expect(find.text('播放器引擎验证'), findsOneWidget);
+      expect(find.byKey(const Key('catalog-mini-player')), findsOneWidget);
       expect(engine.opened.single.title, 'track-1.flac');
       expect(engine.opened.single.uri, testAudio(1).location.locator);
       expect(engineCreations, 1);
       expect(libraryCreations, 1);
       expect(engine.disposeCount, 0);
+      await tester.tap(find.byKey(const Key('mini-open-player')));
+      await tester.pumpAndSettle();
+      expect(find.text('正在播放'), findsOneWidget);
+      expect(find.text('track-1.flac'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       await library.close();
       expect(engine.disposeCount, 1);
@@ -98,22 +108,11 @@ void main() {
     engine.openError = null;
     await tester.tap(find.text('track-1.flac'));
     await tester.pumpAndSettle();
-    expect(find.text('播放器引擎验证'), findsOneWidget);
+    expect(find.byKey(const Key('catalog-mini-player')), findsOneWidget);
     expect(engine.opened, hasLength(1));
     engine.reportError('播放中解码失败');
     await tester.pumpAndSettle();
-    final error = find.byType(SelectableText);
-    await tester.scrollUntilVisible(
-      error,
-      300,
-      scrollable: find
-          .descendant(
-            of: find.byType(ListView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
-    expect(tester.widget<SelectableText>(error).data, '播放中解码失败');
+    expect(find.text('播放失败，请重试。'), findsOneWidget);
   });
 
   testAppWidgets('reopening the library retains its database and engine', (
@@ -136,9 +135,14 @@ void main() {
   testAppWidgets(
     'settings route shares the application database and keeps the player alive',
     (tester) async {
-      await tester.tap(find.byKey(const Key('open-playback-settings')));
+      await tester.tap(find.byKey(const Key('my-settings')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('播放音质'));
       await tester.pumpAndSettle();
       expect(find.text('播放设置'), findsOneWidget);
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('quality-highestLocal')),
+      );
       await tester.tap(find.text('本地最高音质'));
       await tester.pumpAndSettle();
       expect(
@@ -147,7 +151,7 @@ void main() {
       );
       await tester.pageBack();
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('open-playback-settings')));
+      await tester.tap(find.text('播放音质'));
       await tester.pumpAndSettle();
       expect(
         tester
@@ -178,8 +182,8 @@ void main() {
     await tester.pump();
     opening.complete();
     await tester.pumpAndSettle();
-    expect(find.text('播放器引擎验证'), findsOneWidget);
-    expect(find.byKey(const Key('open-local-library')), findsOneWidget);
+    expect(find.byKey(const Key('my-local-library')), findsOneWidget);
+    expect(find.byKey(const Key('catalog-mini-player')), findsOneWidget);
     expect(engine.opened, hasLength(1));
   });
 

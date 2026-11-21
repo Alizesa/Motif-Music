@@ -4,11 +4,18 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../settings/playback_quality_repository.dart';
 import '../../settings/playback_quality_settings.dart';
+import '../../settings/online_playback_settings_controller.dart';
+import '../../online/domain/playback_source.dart';
 
 class PlaybackSettingsPage extends StatefulWidget {
-  const PlaybackSettingsPage({super.key, required this.repository});
+  const PlaybackSettingsPage({
+    super.key,
+    required this.repository,
+    this.onlineSettings,
+  });
 
   final PlaybackQualitySettingsRepository repository;
+  final OnlinePlaybackSettingsController? onlineSettings;
 
   @override
   State<PlaybackSettingsPage> createState() => _PlaybackSettingsPageState();
@@ -24,6 +31,7 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
   void initState() {
     super.initState();
     unawaited(_load());
+    unawaited(widget.onlineSettings?.initialize() ?? Future.value());
   }
 
   Future<void> _load() async {
@@ -68,6 +76,10 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
+              if (widget.onlineSettings case final settings?) ...[
+                _onlineOptions(settings),
+                const SizedBox(height: 28),
+              ],
               Text('本地播放音质', style: Theme.of(context).textTheme.headlineSmall),
               const SizedBox(height: 12),
               const Text('同一首歌曲有多个本地版本时，按以下偏好选择。歌曲信息和时长仍需匹配。'),
@@ -130,6 +142,53 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
           contentPadding: const EdgeInsets.all(16),
           title: Text(title),
           subtitle: Text(subtitle),
+        ),
+      );
+
+  Widget _onlineOptions(OnlinePlaybackSettingsController settings) =>
+      AnimatedBuilder(
+        animation: settings,
+        builder: (context, _) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('在线播放音质', style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 8),
+            const Text('新选择会用于下一次播放。'),
+            const SizedBox(height: 12),
+            if (settings.isLoading) const LinearProgressIndicator(),
+            if (settings.isReady)
+              RadioGroup<OnlineQuality>(
+                groupValue: settings.value.quality,
+                onChanged: (quality) {
+                  if (quality != null) {
+                    unawaited(
+                      settings.save(settings.value.copyWith(quality: quality)),
+                    );
+                  }
+                },
+                child: Column(
+                  children: [
+                    for (final quality in OnlineQuality.values)
+                      Card(
+                        child: RadioListTile<OnlineQuality>(
+                          key: ValueKey('online-quality-${quality.name}'),
+                          title: Text(quality.label),
+                          value: quality,
+                          enabled: !settings.isSaving,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (settings.error case final error?) ...[
+              Text(error),
+              if (!settings.isReady)
+                TextButton(
+                  onPressed: () => unawaited(settings.initialize()),
+                  child: const Text('重试'),
+                ),
+            ],
+          ],
         ),
       );
 }

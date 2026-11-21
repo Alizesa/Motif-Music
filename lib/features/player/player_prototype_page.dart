@@ -14,10 +14,14 @@ class PlayerPrototypePage extends StatefulWidget {
   const PlayerPrototypePage({
     super.key,
     this.engineFactory,
+    this.engine,
     required this.library,
+    this.onQueueWillOpen,
   });
 
   final AudioEngine Function()? engineFactory;
+  final AudioEngine? engine;
+  final VoidCallback? onQueueWillOpen;
   final LibraryController library;
 
   @override
@@ -39,7 +43,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
   @override
   void initState() {
     super.initState();
-    _engine = widget.engineFactory?.call() ?? MpvAudioEngine();
+    _engine = widget.engine ?? widget.engineFactory?.call() ?? MpvAudioEngine();
     _errorSubscription = _engine.errors.listen((message) {
       if (!mounted) return;
       setState(() => _errorMessage = message);
@@ -51,7 +55,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
     _streamUrlController.dispose();
     _equalizerTimer?.cancel();
     unawaited(_errorSubscription?.cancel());
-    unawaited(_engine.dispose());
+    if (widget.engine == null) unawaited(_engine.dispose());
     super.dispose();
   }
 
@@ -63,6 +67,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
           onPlay: (file) async {
             if (!mounted) throw StateError('播放器已关闭');
             setState(() => _errorMessage = null);
+            widget.onQueueWillOpen?.call();
             await _engine.openQueue([
               AudioTrack(uri: file.location.locator, title: file.displayTitle),
             ]);
@@ -94,6 +99,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
       final tracks = files
           .map((file) => AudioTrack(uri: file.uri.toString(), title: file.name))
           .toList(growable: false);
+      widget.onQueueWillOpen?.call();
       await _engine.openQueue(tracks);
     } catch (error) {
       if (mounted) setState(() => _errorMessage = error.toString());
@@ -115,6 +121,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
     });
     try {
       final title = uri.pathSegments.isEmpty ? uri.host : uri.pathSegments.last;
+      widget.onQueueWillOpen?.call();
       await _engine.openQueue([AudioTrack(uri: uri.toString(), title: title)]);
     } catch (error) {
       if (mounted) setState(() => _errorMessage = error.toString());

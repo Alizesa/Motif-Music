@@ -5,7 +5,7 @@ import 'audio_engine.dart';
 /// libmpv-backed audio engine used by the current cross-platform prototype.
 /// Keep this adapter isolated so the native binding can be replaced if device
 /// validation shows platform-specific limitations.
-final class MpvAudioEngine implements AudioEngine {
+final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
   MpvAudioEngine({PlayerApi? player})
     : _player =
           player ??
@@ -19,6 +19,7 @@ final class MpvAudioEngine implements AudioEngine {
 
   final PlayerApi _player;
   final List<double> _equalizerGains = List<double>.filled(10, 0);
+  bool _applicationNavigation = false;
 
   @override
   Stream<bool> get playWhenReady => _player.stream.playWhenReady;
@@ -29,14 +30,41 @@ final class MpvAudioEngine implements AudioEngine {
   @override
   Stream<Duration> get duration => _player.stream.duration;
 
+  @override
+  Stream<bool> get completed => _player.stream.completed;
+
+  @override
+  Stream<AudioQueueNavigation> get navigationRequests => _player
+      .stream
+      .mediaSessionCommands
+      .where(
+        (command) =>
+            command is MediaSessionCommandNext ||
+            command is MediaSessionCommandPrevious,
+      )
+      .map(
+        (command) => command is MediaSessionCommandNext
+            ? AudioQueueNavigation.next
+            : AudioQueueNavigation.previous,
+      );
+
+  @override
+  void useApplicationQueueNavigation(bool enabled) {
+    _applicationNavigation = enabled;
+  }
+
   late final Stream<AudioQueueSnapshot> _queue = _player.stream.playlist.map(
     (playlist) => AudioQueueSnapshot(
       tracks: playlist.items
           .map((media) {
             final title = media.extras?['title'];
+            final artist = media.extras?['artist'];
+            final album = media.extras?['album'];
             return AudioTrack(
               uri: media.uri,
               title: title is String && title.isNotEmpty ? title : media.uri,
+              artist: artist is String ? artist : null,
+              album: album is String ? album : null,
             );
           })
           .toList(growable: false),
@@ -59,10 +87,24 @@ final class MpvAudioEngine implements AudioEngine {
     // The queue stores lightweight references; do not decode the next track
     // while the current one is playing.
     await _player.setPrefetchPlaylist(false);
-    await _player.setMediaSession(const MediaSession(appName: 'Motif'));
+    await _player.setMediaSession(
+      MediaSession(
+        appName: 'Motif',
+        autoApplyPlaylistNavigation: !_applicationNavigation,
+      ),
+    );
 
     final media = tracks
-        .map((track) => Media(track.uri, extras: {'title': track.title}))
+        .map(
+          (track) => Media(
+            track.uri,
+            extras: {
+              'title': track.title,
+              if (track.artist != null) 'artist': track.artist,
+              if (track.album != null) 'album': track.album,
+            },
+          ),
+        )
         .toList(growable: false);
     await _player.openAll(media, play: true);
   }
