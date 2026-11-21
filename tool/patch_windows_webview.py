@@ -49,6 +49,9 @@ def patch_windows_webview(package_config):
              b"  inline constexpr bool always_false_v = false;\n\n"),
         ],
         "utils/string.h": [
+            (b"std::basic_string<T>{ \"\" }", b"std::basic_string<T>{}"),
+            (b"[delim](auto& a, auto& b) { return a + delim + b; }",
+             b"[delim](const auto& a, const auto& b) { return a + delim + b; }"),
             (b"void to_lowercase(const std::basic_string<T>& s)",
              b"void to_lowercase(std::basic_string<T>& s)"),
             (b"void to_uppercase(const std::basic_string<T>& s)\n"
