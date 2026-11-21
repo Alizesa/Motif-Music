@@ -60,6 +60,9 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get
 
+      - name: Prepare Android WebView ProGuard compatibility
+        run: python3 tool/patch_android_webview.py
+
       - name: Prepare stable Android test signing
         if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-')
         env:
@@ -72,7 +75,7 @@ jobs:
           MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
           MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
           MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
-        run: flutter build apk --release
+        run: flutter build apk --release --no-pub
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
