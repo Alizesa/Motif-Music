@@ -66,7 +66,7 @@ abstract final class LibrarySql {
   // ID range scans reuse tracks_present_page, including sparse pending pages.
   // The cursor advances past every inspected row, not only pending candidates.
   static const metadataWindow = '''
-    SELECT t.id, t.metadata_state FROM local_tracks t
+    SELECT t.id, t.metadata_state, t.quality_read_state FROM local_tracks t
     WHERE t.is_present = 1 AND t.id > ? AND t.id <= ?
     ORDER BY t.id LIMIT ?
   ''';
@@ -84,7 +84,8 @@ abstract final class LibrarySql {
     )
     JOIN library_roots r ON r.id = rf.root_id
     WHERE t.id IN ($placeholders) AND t.is_present = 1
-      AND t.metadata_state IN ('pending', ?)
+      AND (t.metadata_state IN ('pending', ?) OR
+        (t.metadata_state = 'ready' AND t.quality_read_state IN ('pending', ?)))
     ORDER BY t.id
   ''';
 
@@ -94,8 +95,9 @@ abstract final class LibrarySql {
     INSERT INTO local_tracks (
       platform, location_key, locator, file_name, size_bytes, modified_ms,
       title, artist, album, title_key, artist_key, album_key, duration_ms,
-      container, codec, metadata_state, normalization_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      container, codec, metadata_state, normalization_version,
+      bitrate_kbps, sample_rate_hz, channels, is_lossless, quality_read_state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(platform, location_key) DO UPDATE SET
       locator = excluded.locator, file_name = excluded.file_name,
       size_bytes = excluded.size_bytes, modified_ms = excluded.modified_ms,
@@ -113,6 +115,10 @@ abstract final class LibrarySql {
             local_tracks.duration_ms IS NOT excluded.duration_ms OR
             local_tracks.container IS NOT excluded.container OR
             local_tracks.codec IS NOT excluded.codec OR
+            local_tracks.bitrate_kbps IS NOT excluded.bitrate_kbps OR
+            local_tracks.sample_rate_hz IS NOT excluded.sample_rate_hz OR
+            local_tracks.channels IS NOT excluded.channels OR
+            local_tracks.is_lossless IS NOT excluded.is_lossless OR
             local_tracks.metadata_state IS NOT excluded.metadata_state OR
             local_tracks.normalization_version <> excluded.normalization_version
           )
@@ -126,6 +132,11 @@ abstract final class LibrarySql {
       duration_ms = CASE WHEN $replaceMetadata THEN excluded.duration_ms ELSE local_tracks.duration_ms END,
       container = CASE WHEN $replaceMetadata THEN excluded.container ELSE local_tracks.container END,
       codec = CASE WHEN $replaceMetadata THEN excluded.codec ELSE local_tracks.codec END,
+      bitrate_kbps = CASE WHEN $replaceMetadata THEN excluded.bitrate_kbps ELSE local_tracks.bitrate_kbps END,
+      sample_rate_hz = CASE WHEN $replaceMetadata THEN excluded.sample_rate_hz ELSE local_tracks.sample_rate_hz END,
+      channels = CASE WHEN $replaceMetadata THEN excluded.channels ELSE local_tracks.channels END,
+      is_lossless = CASE WHEN $replaceMetadata THEN excluded.is_lossless ELSE local_tracks.is_lossless END,
+      quality_read_state = CASE WHEN $replaceMetadata THEN excluded.quality_read_state ELSE local_tracks.quality_read_state END,
       metadata_state = CASE WHEN $replaceMetadata THEN excluded.metadata_state ELSE local_tracks.metadata_state END,
       normalization_version = CASE WHEN $replaceMetadata THEN excluded.normalization_version ELSE local_tracks.normalization_version END,
       is_present = 1

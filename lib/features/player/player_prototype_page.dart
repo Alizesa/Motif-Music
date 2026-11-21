@@ -8,6 +8,7 @@ import '../../audio/audio_engine.dart';
 import '../../audio/mpv_audio_engine.dart';
 import '../../library/application/library_controller.dart';
 import '../library/library_page.dart';
+import '../settings/playback_settings_page.dart';
 
 class PlayerPrototypePage extends StatefulWidget {
   const PlayerPrototypePage({
@@ -159,6 +160,20 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
       appBar: AppBar(
         title: const Text('Motif'),
         actions: [
+          IconButton(
+            key: const Key('open-playback-settings'),
+            tooltip: '播放设置',
+            onPressed: () => unawaited(
+              Navigator.of(context).push<void>(
+                MaterialPageRoute(
+                  builder: (_) => PlaybackSettingsPage(
+                    repository: widget.library.playbackQualitySettings,
+                  ),
+                ),
+              ),
+            ),
+            icon: const Icon(Icons.settings_outlined),
+          ),
           IconButton(
             key: const Key('open-local-library'),
             tooltip: '本地曲库',

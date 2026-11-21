@@ -870,6 +870,62 @@ class LocalTracks extends Table with TableInfo<LocalTracks, LocalTrack> {
     $customConstraints: 'NOT NULL DEFAULT 1 CHECK (is_present IN (0, 1))',
     defaultValue: const CustomExpression('1'),
   );
+  static const VerificationMeta _bitrateKbpsMeta = const VerificationMeta(
+    'bitrateKbps',
+  );
+  late final GeneratedColumn<int> bitrateKbps = GeneratedColumn<int>(
+    'bitrate_kbps',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'CHECK (bitrate_kbps > 0)',
+  );
+  static const VerificationMeta _sampleRateHzMeta = const VerificationMeta(
+    'sampleRateHz',
+  );
+  late final GeneratedColumn<int> sampleRateHz = GeneratedColumn<int>(
+    'sample_rate_hz',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'CHECK (sample_rate_hz > 0)',
+  );
+  static const VerificationMeta _channelsMeta = const VerificationMeta(
+    'channels',
+  );
+  late final GeneratedColumn<int> channels = GeneratedColumn<int>(
+    'channels',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'CHECK (channels > 0)',
+  );
+  static const VerificationMeta _isLosslessMeta = const VerificationMeta(
+    'isLossless',
+  );
+  late final GeneratedColumn<int> isLossless = GeneratedColumn<int>(
+    'is_lossless',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'CHECK (is_lossless IN (0, 1))',
+  );
+  static const VerificationMeta _qualityReadStateMeta = const VerificationMeta(
+    'qualityReadState',
+  );
+  late final GeneratedColumn<String> qualityReadState = GeneratedColumn<String>(
+    'quality_read_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\' CHECK (quality_read_state IN (\'pending\', \'ready\', \'failed\'))',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -892,6 +948,11 @@ class LocalTracks extends Table with TableInfo<LocalTracks, LocalTrack> {
     normalizationVersion,
     revision,
     isPresent,
+    bitrateKbps,
+    sampleRateHz,
+    channels,
+    isLossless,
+    qualityReadState,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1039,6 +1100,45 @@ class LocalTracks extends Table with TableInfo<LocalTracks, LocalTrack> {
         isPresent.isAcceptableOrUnknown(data['is_present']!, _isPresentMeta),
       );
     }
+    if (data.containsKey('bitrate_kbps')) {
+      context.handle(
+        _bitrateKbpsMeta,
+        bitrateKbps.isAcceptableOrUnknown(
+          data['bitrate_kbps']!,
+          _bitrateKbpsMeta,
+        ),
+      );
+    }
+    if (data.containsKey('sample_rate_hz')) {
+      context.handle(
+        _sampleRateHzMeta,
+        sampleRateHz.isAcceptableOrUnknown(
+          data['sample_rate_hz']!,
+          _sampleRateHzMeta,
+        ),
+      );
+    }
+    if (data.containsKey('channels')) {
+      context.handle(
+        _channelsMeta,
+        channels.isAcceptableOrUnknown(data['channels']!, _channelsMeta),
+      );
+    }
+    if (data.containsKey('is_lossless')) {
+      context.handle(
+        _isLosslessMeta,
+        isLossless.isAcceptableOrUnknown(data['is_lossless']!, _isLosslessMeta),
+      );
+    }
+    if (data.containsKey('quality_read_state')) {
+      context.handle(
+        _qualityReadStateMeta,
+        qualityReadState.isAcceptableOrUnknown(
+          data['quality_read_state']!,
+          _qualityReadStateMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1132,6 +1232,26 @@ class LocalTracks extends Table with TableInfo<LocalTracks, LocalTrack> {
         DriftSqlType.int,
         data['${effectivePrefix}is_present'],
       )!,
+      bitrateKbps: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}bitrate_kbps'],
+      ),
+      sampleRateHz: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sample_rate_hz'],
+      ),
+      channels: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}channels'],
+      ),
+      isLossless: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_lossless'],
+      ),
+      qualityReadState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}quality_read_state'],
+      )!,
     );
   }
 
@@ -1169,6 +1289,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
   final int normalizationVersion;
   final int revision;
   final int isPresent;
+  final int? bitrateKbps;
+  final int? sampleRateHz;
+  final int? channels;
+  final int? isLossless;
+  final String qualityReadState;
   const LocalTrack({
     required this.id,
     required this.platform,
@@ -1190,6 +1315,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
     required this.normalizationVersion,
     required this.revision,
     required this.isPresent,
+    this.bitrateKbps,
+    this.sampleRateHz,
+    this.channels,
+    this.isLossless,
+    required this.qualityReadState,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1224,6 +1354,19 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
     map['normalization_version'] = Variable<int>(normalizationVersion);
     map['revision'] = Variable<int>(revision);
     map['is_present'] = Variable<int>(isPresent);
+    if (!nullToAbsent || bitrateKbps != null) {
+      map['bitrate_kbps'] = Variable<int>(bitrateKbps);
+    }
+    if (!nullToAbsent || sampleRateHz != null) {
+      map['sample_rate_hz'] = Variable<int>(sampleRateHz);
+    }
+    if (!nullToAbsent || channels != null) {
+      map['channels'] = Variable<int>(channels);
+    }
+    if (!nullToAbsent || isLossless != null) {
+      map['is_lossless'] = Variable<int>(isLossless);
+    }
+    map['quality_read_state'] = Variable<String>(qualityReadState);
     return map;
   }
 
@@ -1259,6 +1402,19 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
       normalizationVersion: Value(normalizationVersion),
       revision: Value(revision),
       isPresent: Value(isPresent),
+      bitrateKbps: bitrateKbps == null && nullToAbsent
+          ? const Value.absent()
+          : Value(bitrateKbps),
+      sampleRateHz: sampleRateHz == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sampleRateHz),
+      channels: channels == null && nullToAbsent
+          ? const Value.absent()
+          : Value(channels),
+      isLossless: isLossless == null && nullToAbsent
+          ? const Value.absent()
+          : Value(isLossless),
+      qualityReadState: Value(qualityReadState),
     );
   }
 
@@ -1290,6 +1446,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
       ),
       revision: serializer.fromJson<int>(json['revision']),
       isPresent: serializer.fromJson<int>(json['is_present']),
+      bitrateKbps: serializer.fromJson<int?>(json['bitrate_kbps']),
+      sampleRateHz: serializer.fromJson<int?>(json['sample_rate_hz']),
+      channels: serializer.fromJson<int?>(json['channels']),
+      isLossless: serializer.fromJson<int?>(json['is_lossless']),
+      qualityReadState: serializer.fromJson<String>(json['quality_read_state']),
     );
   }
   @override
@@ -1316,6 +1477,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
       'normalization_version': serializer.toJson<int>(normalizationVersion),
       'revision': serializer.toJson<int>(revision),
       'is_present': serializer.toJson<int>(isPresent),
+      'bitrate_kbps': serializer.toJson<int?>(bitrateKbps),
+      'sample_rate_hz': serializer.toJson<int?>(sampleRateHz),
+      'channels': serializer.toJson<int?>(channels),
+      'is_lossless': serializer.toJson<int?>(isLossless),
+      'quality_read_state': serializer.toJson<String>(qualityReadState),
     };
   }
 
@@ -1340,6 +1506,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
     int? normalizationVersion,
     int? revision,
     int? isPresent,
+    Value<int?> bitrateKbps = const Value.absent(),
+    Value<int?> sampleRateHz = const Value.absent(),
+    Value<int?> channels = const Value.absent(),
+    Value<int?> isLossless = const Value.absent(),
+    String? qualityReadState,
   }) => LocalTrack(
     id: id ?? this.id,
     platform: platform ?? this.platform,
@@ -1361,6 +1532,11 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
     normalizationVersion: normalizationVersion ?? this.normalizationVersion,
     revision: revision ?? this.revision,
     isPresent: isPresent ?? this.isPresent,
+    bitrateKbps: bitrateKbps.present ? bitrateKbps.value : this.bitrateKbps,
+    sampleRateHz: sampleRateHz.present ? sampleRateHz.value : this.sampleRateHz,
+    channels: channels.present ? channels.value : this.channels,
+    isLossless: isLossless.present ? isLossless.value : this.isLossless,
+    qualityReadState: qualityReadState ?? this.qualityReadState,
   );
   LocalTrack copyWithCompanion(LocalTracksCompanion data) {
     return LocalTrack(
@@ -1394,6 +1570,19 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
           : this.normalizationVersion,
       revision: data.revision.present ? data.revision.value : this.revision,
       isPresent: data.isPresent.present ? data.isPresent.value : this.isPresent,
+      bitrateKbps: data.bitrateKbps.present
+          ? data.bitrateKbps.value
+          : this.bitrateKbps,
+      sampleRateHz: data.sampleRateHz.present
+          ? data.sampleRateHz.value
+          : this.sampleRateHz,
+      channels: data.channels.present ? data.channels.value : this.channels,
+      isLossless: data.isLossless.present
+          ? data.isLossless.value
+          : this.isLossless,
+      qualityReadState: data.qualityReadState.present
+          ? data.qualityReadState.value
+          : this.qualityReadState,
     );
   }
 
@@ -1419,13 +1608,18 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
           ..write('metadataState: $metadataState, ')
           ..write('normalizationVersion: $normalizationVersion, ')
           ..write('revision: $revision, ')
-          ..write('isPresent: $isPresent')
+          ..write('isPresent: $isPresent, ')
+          ..write('bitrateKbps: $bitrateKbps, ')
+          ..write('sampleRateHz: $sampleRateHz, ')
+          ..write('channels: $channels, ')
+          ..write('isLossless: $isLossless, ')
+          ..write('qualityReadState: $qualityReadState')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     id,
     platform,
     locationKey,
@@ -1446,7 +1640,12 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
     normalizationVersion,
     revision,
     isPresent,
-  );
+    bitrateKbps,
+    sampleRateHz,
+    channels,
+    isLossless,
+    qualityReadState,
+  ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1470,7 +1669,12 @@ class LocalTrack extends DataClass implements Insertable<LocalTrack> {
           other.metadataState == this.metadataState &&
           other.normalizationVersion == this.normalizationVersion &&
           other.revision == this.revision &&
-          other.isPresent == this.isPresent);
+          other.isPresent == this.isPresent &&
+          other.bitrateKbps == this.bitrateKbps &&
+          other.sampleRateHz == this.sampleRateHz &&
+          other.channels == this.channels &&
+          other.isLossless == this.isLossless &&
+          other.qualityReadState == this.qualityReadState);
 }
 
 class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
@@ -1494,6 +1698,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
   final Value<int> normalizationVersion;
   final Value<int> revision;
   final Value<int> isPresent;
+  final Value<int?> bitrateKbps;
+  final Value<int?> sampleRateHz;
+  final Value<int?> channels;
+  final Value<int?> isLossless;
+  final Value<String> qualityReadState;
   const LocalTracksCompanion({
     this.id = const Value.absent(),
     this.platform = const Value.absent(),
@@ -1515,6 +1724,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
     this.normalizationVersion = const Value.absent(),
     this.revision = const Value.absent(),
     this.isPresent = const Value.absent(),
+    this.bitrateKbps = const Value.absent(),
+    this.sampleRateHz = const Value.absent(),
+    this.channels = const Value.absent(),
+    this.isLossless = const Value.absent(),
+    this.qualityReadState = const Value.absent(),
   });
   LocalTracksCompanion.insert({
     this.id = const Value.absent(),
@@ -1537,6 +1751,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
     this.normalizationVersion = const Value.absent(),
     this.revision = const Value.absent(),
     this.isPresent = const Value.absent(),
+    this.bitrateKbps = const Value.absent(),
+    this.sampleRateHz = const Value.absent(),
+    this.channels = const Value.absent(),
+    this.isLossless = const Value.absent(),
+    this.qualityReadState = const Value.absent(),
   }) : platform = Value(platform),
        locationKey = Value(locationKey),
        locator = Value(locator),
@@ -1562,6 +1781,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
     Expression<int>? normalizationVersion,
     Expression<int>? revision,
     Expression<int>? isPresent,
+    Expression<int>? bitrateKbps,
+    Expression<int>? sampleRateHz,
+    Expression<int>? channels,
+    Expression<int>? isLossless,
+    Expression<String>? qualityReadState,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -1585,6 +1809,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
         'normalization_version': normalizationVersion,
       if (revision != null) 'revision': revision,
       if (isPresent != null) 'is_present': isPresent,
+      if (bitrateKbps != null) 'bitrate_kbps': bitrateKbps,
+      if (sampleRateHz != null) 'sample_rate_hz': sampleRateHz,
+      if (channels != null) 'channels': channels,
+      if (isLossless != null) 'is_lossless': isLossless,
+      if (qualityReadState != null) 'quality_read_state': qualityReadState,
     });
   }
 
@@ -1609,6 +1838,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
     Value<int>? normalizationVersion,
     Value<int>? revision,
     Value<int>? isPresent,
+    Value<int?>? bitrateKbps,
+    Value<int?>? sampleRateHz,
+    Value<int?>? channels,
+    Value<int?>? isLossless,
+    Value<String>? qualityReadState,
   }) {
     return LocalTracksCompanion(
       id: id ?? this.id,
@@ -1631,6 +1865,11 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
       normalizationVersion: normalizationVersion ?? this.normalizationVersion,
       revision: revision ?? this.revision,
       isPresent: isPresent ?? this.isPresent,
+      bitrateKbps: bitrateKbps ?? this.bitrateKbps,
+      sampleRateHz: sampleRateHz ?? this.sampleRateHz,
+      channels: channels ?? this.channels,
+      isLossless: isLossless ?? this.isLossless,
+      qualityReadState: qualityReadState ?? this.qualityReadState,
     );
   }
 
@@ -1697,6 +1936,21 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
     if (isPresent.present) {
       map['is_present'] = Variable<int>(isPresent.value);
     }
+    if (bitrateKbps.present) {
+      map['bitrate_kbps'] = Variable<int>(bitrateKbps.value);
+    }
+    if (sampleRateHz.present) {
+      map['sample_rate_hz'] = Variable<int>(sampleRateHz.value);
+    }
+    if (channels.present) {
+      map['channels'] = Variable<int>(channels.value);
+    }
+    if (isLossless.present) {
+      map['is_lossless'] = Variable<int>(isLossless.value);
+    }
+    if (qualityReadState.present) {
+      map['quality_read_state'] = Variable<String>(qualityReadState.value);
+    }
     return map;
   }
 
@@ -1722,7 +1976,12 @@ class LocalTracksCompanion extends UpdateCompanion<LocalTrack> {
           ..write('metadataState: $metadataState, ')
           ..write('normalizationVersion: $normalizationVersion, ')
           ..write('revision: $revision, ')
-          ..write('isPresent: $isPresent')
+          ..write('isPresent: $isPresent, ')
+          ..write('bitrateKbps: $bitrateKbps, ')
+          ..write('sampleRateHz: $sampleRateHz, ')
+          ..write('channels: $channels, ')
+          ..write('isLossless: $isLossless, ')
+          ..write('qualityReadState: $qualityReadState')
           ..write(')'))
         .toString();
   }
@@ -2535,6 +2794,212 @@ class SourceTrackLinksCompanion extends UpdateCompanion<SourceTrackLink> {
   }
 }
 
+class PlaybackSettings extends Table
+    with TableInfo<PlaybackSettings, PlaybackSetting> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  PlaybackSettings(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL PRIMARY KEY CHECK (id = 1)',
+  );
+  static const VerificationMeta _localQualityModeMeta = const VerificationMeta(
+    'localQualityMode',
+  );
+  late final GeneratedColumn<String> localQualityMode = GeneratedColumn<String>(
+    'local_quality_mode',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'followOnline\' CHECK (local_quality_mode IN (\'followOnline\', \'highestLocal\'))',
+    defaultValue: const CustomExpression('\'followOnline\''),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [id, localQualityMode];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'playback_settings';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<PlaybackSetting> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('local_quality_mode')) {
+      context.handle(
+        _localQualityModeMeta,
+        localQualityMode.isAcceptableOrUnknown(
+          data['local_quality_mode']!,
+          _localQualityModeMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  PlaybackSetting map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return PlaybackSetting(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      localQualityMode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}local_quality_mode'],
+      )!,
+    );
+  }
+
+  @override
+  PlaybackSettings createAlias(String alias) {
+    return PlaybackSettings(attachedDatabase, alias);
+  }
+
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class PlaybackSetting extends DataClass implements Insertable<PlaybackSetting> {
+  final int id;
+  final String localQualityMode;
+  const PlaybackSetting({required this.id, required this.localQualityMode});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['local_quality_mode'] = Variable<String>(localQualityMode);
+    return map;
+  }
+
+  PlaybackSettingsCompanion toCompanion(bool nullToAbsent) {
+    return PlaybackSettingsCompanion(
+      id: Value(id),
+      localQualityMode: Value(localQualityMode),
+    );
+  }
+
+  factory PlaybackSetting.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return PlaybackSetting(
+      id: serializer.fromJson<int>(json['id']),
+      localQualityMode: serializer.fromJson<String>(json['local_quality_mode']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'local_quality_mode': serializer.toJson<String>(localQualityMode),
+    };
+  }
+
+  PlaybackSetting copyWith({int? id, String? localQualityMode}) =>
+      PlaybackSetting(
+        id: id ?? this.id,
+        localQualityMode: localQualityMode ?? this.localQualityMode,
+      );
+  PlaybackSetting copyWithCompanion(PlaybackSettingsCompanion data) {
+    return PlaybackSetting(
+      id: data.id.present ? data.id.value : this.id,
+      localQualityMode: data.localQualityMode.present
+          ? data.localQualityMode.value
+          : this.localQualityMode,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PlaybackSetting(')
+          ..write('id: $id, ')
+          ..write('localQualityMode: $localQualityMode')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, localQualityMode);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is PlaybackSetting &&
+          other.id == this.id &&
+          other.localQualityMode == this.localQualityMode);
+}
+
+class PlaybackSettingsCompanion extends UpdateCompanion<PlaybackSetting> {
+  final Value<int> id;
+  final Value<String> localQualityMode;
+  const PlaybackSettingsCompanion({
+    this.id = const Value.absent(),
+    this.localQualityMode = const Value.absent(),
+  });
+  PlaybackSettingsCompanion.insert({
+    this.id = const Value.absent(),
+    this.localQualityMode = const Value.absent(),
+  });
+  static Insertable<PlaybackSetting> custom({
+    Expression<int>? id,
+    Expression<String>? localQualityMode,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (localQualityMode != null) 'local_quality_mode': localQualityMode,
+    });
+  }
+
+  PlaybackSettingsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? localQualityMode,
+  }) {
+    return PlaybackSettingsCompanion(
+      id: id ?? this.id,
+      localQualityMode: localQualityMode ?? this.localQualityMode,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (localQualityMode.present) {
+      map['local_quality_mode'] = Variable<String>(localQualityMode.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PlaybackSettingsCompanion(')
+          ..write('id: $id, ')
+          ..write('localQualityMode: $localQualityMode')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$LibraryDatabase extends GeneratedDatabase {
   _$LibraryDatabase(QueryExecutor e) : super(e);
   $LibraryDatabaseManager get managers => $LibraryDatabaseManager(this);
@@ -2558,6 +3023,7 @@ abstract class _$LibraryDatabase extends GeneratedDatabase {
     'source_links_by_file',
     'CREATE INDEX source_links_by_file ON source_track_links (file_id)',
   );
+  late final PlaybackSettings playbackSettings = PlaybackSettings(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2571,6 +3037,7 @@ abstract class _$LibraryDatabase extends GeneratedDatabase {
     tracksPresentPage,
     sourceTrackLinks,
     sourceLinksByFile,
+    playbackSettings,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -3012,6 +3479,11 @@ typedef $LocalTracksCreateCompanionBuilder = LocalTracksCompanion Function({
   Value<int> normalizationVersion,
   Value<int> revision,
   Value<int> isPresent,
+  Value<int?> bitrateKbps,
+  Value<int?> sampleRateHz,
+  Value<int?> channels,
+  Value<int?> isLossless,
+  Value<String> qualityReadState,
 });
 typedef $LocalTracksUpdateCompanionBuilder = LocalTracksCompanion Function({
   Value<int> id,
@@ -3034,6 +3506,11 @@ typedef $LocalTracksUpdateCompanionBuilder = LocalTracksCompanion Function({
   Value<int> normalizationVersion,
   Value<int> revision,
   Value<int> isPresent,
+  Value<int?> bitrateKbps,
+  Value<int?> sampleRateHz,
+  Value<int?> channels,
+  Value<int?> isLossless,
+  Value<String> qualityReadState,
 });
 
 final class $LocalTracksReferences
@@ -3187,6 +3664,31 @@ class $LocalTracksFilterComposer
 
   ColumnFilters<int> get isPresent => $composableBuilder(
     column: $table.isPresent,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get bitrateKbps => $composableBuilder(
+    column: $table.bitrateKbps,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get sampleRateHz => $composableBuilder(
+    column: $table.sampleRateHz,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get channels => $composableBuilder(
+    column: $table.channels,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isLossless => $composableBuilder(
+    column: $table.isLossless,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get qualityReadState => $composableBuilder(
+    column: $table.qualityReadState,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3349,6 +3851,31 @@ class $LocalTracksOrderingComposer
     column: $table.isPresent,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get bitrateKbps => $composableBuilder(
+    column: $table.bitrateKbps,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get sampleRateHz => $composableBuilder(
+    column: $table.sampleRateHz,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get channels => $composableBuilder(
+    column: $table.channels,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isLossless => $composableBuilder(
+    column: $table.isLossless,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get qualityReadState => $composableBuilder(
+    column: $table.qualityReadState,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $LocalTracksAnnotationComposer
@@ -3429,6 +3956,29 @@ class $LocalTracksAnnotationComposer
 
   GeneratedColumn<int> get isPresent =>
       $composableBuilder(column: $table.isPresent, builder: (column) => column);
+
+  GeneratedColumn<int> get bitrateKbps => $composableBuilder(
+    column: $table.bitrateKbps,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get sampleRateHz => $composableBuilder(
+    column: $table.sampleRateHz,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get channels =>
+      $composableBuilder(column: $table.channels, builder: (column) => column);
+
+  GeneratedColumn<int> get isLossless => $composableBuilder(
+    column: $table.isLossless,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get qualityReadState => $composableBuilder(
+    column: $table.qualityReadState,
+    builder: (column) => column,
+  );
 
   Expression<T> rootFilesRefs<T extends Object>(
     Expression<T> Function($RootFilesAnnotationComposer a) f,
@@ -3532,6 +4082,11 @@ class $LocalTracksTableManager
                 Value<int> normalizationVersion = const Value.absent(),
                 Value<int> revision = const Value.absent(),
                 Value<int> isPresent = const Value.absent(),
+                Value<int?> bitrateKbps = const Value.absent(),
+                Value<int?> sampleRateHz = const Value.absent(),
+                Value<int?> channels = const Value.absent(),
+                Value<int?> isLossless = const Value.absent(),
+                Value<String> qualityReadState = const Value.absent(),
               }) => LocalTracksCompanion(
                 id: id,
                 platform: platform,
@@ -3553,6 +4108,11 @@ class $LocalTracksTableManager
                 normalizationVersion: normalizationVersion,
                 revision: revision,
                 isPresent: isPresent,
+                bitrateKbps: bitrateKbps,
+                sampleRateHz: sampleRateHz,
+                channels: channels,
+                isLossless: isLossless,
+                qualityReadState: qualityReadState,
               ),
           createCompanionCallback:
               ({
@@ -3576,6 +4136,11 @@ class $LocalTracksTableManager
                 Value<int> normalizationVersion = const Value.absent(),
                 Value<int> revision = const Value.absent(),
                 Value<int> isPresent = const Value.absent(),
+                Value<int?> bitrateKbps = const Value.absent(),
+                Value<int?> sampleRateHz = const Value.absent(),
+                Value<int?> channels = const Value.absent(),
+                Value<int?> isLossless = const Value.absent(),
+                Value<String> qualityReadState = const Value.absent(),
               }) => LocalTracksCompanion.insert(
                 id: id,
                 platform: platform,
@@ -3597,6 +4162,11 @@ class $LocalTracksTableManager
                 normalizationVersion: normalizationVersion,
                 revision: revision,
                 isPresent: isPresent,
+                bitrateKbps: bitrateKbps,
+                sampleRateHz: sampleRateHz,
+                channels: channels,
+                isLossless: isLossless,
+                qualityReadState: qualityReadState,
               ),
           withReferenceMapper: (p0) => p0
               .map(
@@ -4408,6 +4978,158 @@ typedef $SourceTrackLinksProcessedTableManager =
       SourceTrackLink,
       PrefetchHooks Function({bool fileId})
     >;
+typedef $PlaybackSettingsCreateCompanionBuilder =
+    PlaybackSettingsCompanion Function({
+      Value<int> id,
+      Value<String> localQualityMode,
+    });
+typedef $PlaybackSettingsUpdateCompanionBuilder =
+    PlaybackSettingsCompanion Function({
+      Value<int> id,
+      Value<String> localQualityMode,
+    });
+
+class $PlaybackSettingsFilterComposer
+    extends Composer<_$LibraryDatabase, PlaybackSettings> {
+  $PlaybackSettingsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get localQualityMode => $composableBuilder(
+    column: $table.localQualityMode,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $PlaybackSettingsOrderingComposer
+    extends Composer<_$LibraryDatabase, PlaybackSettings> {
+  $PlaybackSettingsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get localQualityMode => $composableBuilder(
+    column: $table.localQualityMode,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $PlaybackSettingsAnnotationComposer
+    extends Composer<_$LibraryDatabase, PlaybackSettings> {
+  $PlaybackSettingsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get localQualityMode => $composableBuilder(
+    column: $table.localQualityMode,
+    builder: (column) => column,
+  );
+}
+
+class $PlaybackSettingsTableManager
+    extends
+        RootTableManager<
+          _$LibraryDatabase,
+          PlaybackSettings,
+          PlaybackSetting,
+          $PlaybackSettingsFilterComposer,
+          $PlaybackSettingsOrderingComposer,
+          $PlaybackSettingsAnnotationComposer,
+          $PlaybackSettingsCreateCompanionBuilder,
+          $PlaybackSettingsUpdateCompanionBuilder,
+          (
+            PlaybackSetting,
+            BaseReferences<
+              _$LibraryDatabase,
+              PlaybackSettings,
+              PlaybackSetting
+            >,
+          ),
+          PlaybackSetting,
+          PrefetchHooks Function()
+        > {
+  $PlaybackSettingsTableManager(_$LibraryDatabase db, PlaybackSettings table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $PlaybackSettingsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $PlaybackSettingsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $PlaybackSettingsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> localQualityMode = const Value.absent(),
+              }) => PlaybackSettingsCompanion(
+                id: id,
+                localQualityMode: localQualityMode,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> localQualityMode = const Value.absent(),
+              }) => PlaybackSettingsCompanion.insert(
+                id: id,
+                localQualityMode: localQualityMode,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable<PlaybackSettings, PlaybackSetting>(table),
+                  BaseReferences<
+                    _$LibraryDatabase,
+                    PlaybackSettings,
+                    PlaybackSetting
+                  >(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $PlaybackSettingsProcessedTableManager =
+    ProcessedTableManager<
+      _$LibraryDatabase,
+      PlaybackSettings,
+      PlaybackSetting,
+      $PlaybackSettingsFilterComposer,
+      $PlaybackSettingsOrderingComposer,
+      $PlaybackSettingsAnnotationComposer,
+      $PlaybackSettingsCreateCompanionBuilder,
+      $PlaybackSettingsUpdateCompanionBuilder,
+      (
+        PlaybackSetting,
+        BaseReferences<_$LibraryDatabase, PlaybackSettings, PlaybackSetting>,
+      ),
+      PlaybackSetting,
+      PrefetchHooks Function()
+    >;
 
 class $LibraryDatabaseManager {
   final _$LibraryDatabase _db;
@@ -4420,4 +5142,6 @@ class $LibraryDatabaseManager {
       $RootFilesTableManager(_db, _db.rootFiles);
   $SourceTrackLinksTableManager get sourceTrackLinks =>
       $SourceTrackLinksTableManager(_db, _db.sourceTrackLinks);
+  $PlaybackSettingsTableManager get playbackSettings =>
+      $PlaybackSettingsTableManager(_db, _db.playbackSettings);
 }

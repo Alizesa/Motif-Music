@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/library/application/library_controller.dart';
 import 'package:motif/library/data/library_database.dart';
 import 'package:motif/main.dart';
+import 'package:motif/settings/playback_quality_settings.dart';
 
 import 'support/library_fixtures.dart';
 
@@ -131,6 +132,36 @@ void main() {
     expect(libraryCreations, 1);
     expect(engine.disposeCount, 0);
   });
+
+  testAppWidgets(
+    'settings route shares the application database and keeps the player alive',
+    (tester) async {
+      await tester.tap(find.byKey(const Key('open-playback-settings')));
+      await tester.pumpAndSettle();
+      expect(find.text('播放设置'), findsOneWidget);
+      await tester.tap(find.text('本地最高音质'));
+      await tester.pumpAndSettle();
+      expect(
+        await library.playbackQualitySettings.loadMode(),
+        PlaybackQualityMode.highestLocal,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('open-playback-settings')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<RadioListTile<PlaybackQualityMode>>(
+              find.byKey(const ValueKey('quality-highestLocal')),
+            )
+            .selected,
+        isTrue,
+      );
+      expect(engineCreations, 1);
+      expect(libraryCreations, 1);
+      expect(engine.disposeCount, 0);
+    },
+  );
 
   testAppWidgets('finishing playback during back navigation keeps the player', (
     tester,

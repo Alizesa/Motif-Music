@@ -1,0 +1,1 @@
+enum PlaybackQualityMode { followOnline, highestLocal }

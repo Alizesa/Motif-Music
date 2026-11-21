@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../settings/playback_quality_repository.dart';
+import '../domain/audio_quality.dart';
+import '../domain/local_playback_matcher.dart';
 import '../data/library_database.dart';
 import '../data/library_repository.dart';
 import '../data/open_library_database.dart';
@@ -22,6 +25,7 @@ final class LibraryController extends ChangeNotifier {
     Future<void> Function(FileLocation)? verifyFile,
     LibraryMetadataReader? metadataReader,
   }) : _database = database,
+       playbackQualitySettings = PlaybackQualitySettingsRepository(database),
        _repository = LibraryRepository(database),
        _source = source,
        _verifyFile = verifyFile ?? verifyLibraryFileAccess {
@@ -39,6 +43,7 @@ final class LibraryController extends ChangeNotifier {
 
   static const pageSize = 100;
   final LibraryDatabase _database;
+  final PlaybackQualitySettingsRepository playbackQualitySettings;
   final LibraryRepository _repository;
   final LibraryPlatformSource _source;
   final Future<void> Function(FileLocation) _verifyFile;
@@ -89,6 +94,22 @@ final class LibraryController extends ChangeNotifier {
   bool get isMetadataCancelling => _metadataCancellation?.isCancelled ?? false;
   MetadataProgress get metadataProgress => _metadataProgress;
   String? get metadataMessage => _metadataMessage;
+
+  /// Provider adapters pass the actual selected stream quality, never a label
+  /// guessed from a container or filename. This performs no network requests.
+  Future<LocalPlaybackResolution> resolveLocalPlayback({
+    required TrackMetadata track,
+    AudioQuality? onlineQuality,
+  }) async {
+    if (_closed) throw StateError('曲库已关闭');
+    final mode = await playbackQualitySettings.loadMode();
+    if (_closed) throw StateError('曲库已关闭');
+    return _repository.resolveLocalPlayback(
+      track: track,
+      mode: mode,
+      onlineQuality: onlineQuality,
+    );
+  }
 
   Future<void> initialize() {
     if (_closed || _initialized) return Future.value();

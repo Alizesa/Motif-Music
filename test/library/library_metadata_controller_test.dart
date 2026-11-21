@@ -81,6 +81,62 @@ void main() {
   );
 
   test(
+    'startup refreshes legacy quality and cancellation keeps usable tags',
+    () async {
+      source.files = [testAudio(1)];
+      await seed();
+      final candidate = (await repository.metadataWindow(
+        afterId: 0,
+        throughId: 1,
+      )).candidates.single;
+      await repository.writeMetadata(
+        candidate,
+        const TrackMetadata(
+          title: 'Song',
+          artist: 'Artist',
+          durationMs: 180000,
+        ),
+      );
+      await db.customStatement(
+        "UPDATE local_tracks SET quality_read_state = 'pending'",
+      );
+      gate = Completer<TrackMetadata>();
+      final entered = Completer<void>();
+      var blocked = true;
+      const quality = TrackMetadata(
+        title: 'Song',
+        artist: 'Artist',
+        durationMs: 180000,
+        bitrateKbps: 320,
+        sampleRateHz: 44100,
+        channels: 2,
+      );
+      final reader = FakeMetadataReader((_) {
+        if (!entered.isCompleted) entered.complete();
+        return blocked ? gate!.future : Future.value(quality);
+      });
+      final c = create(reader);
+      await c.initialize();
+      await entered.future;
+      expect(c.files.single.metadata.title, 'Song');
+      expect(c.files.single.metadata.state, MetadataState.ready);
+      expect(c.isBusy, isFalse);
+      c.cancelMetadata();
+      gate!.complete(quality);
+      while (c.isReadingMetadata) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(c.files.single.metadata.title, 'Song');
+      expect(c.files.single.quality.hasKnownMetric, isFalse);
+      blocked = false;
+      await c.startMetadata();
+      expect(c.files.single.quality.bitrateKbps, 320);
+      expect(reader.calls, [1, 1]);
+      expect(reader.maxActive, 1);
+    },
+  );
+
+  test(
     'postscan automatic extraction and unchanged scan skip ready files',
     () async {
       final reader = FakeMetadataReader(

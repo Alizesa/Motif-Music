@@ -1,3 +1,4 @@
+import 'audio_quality.dart';
 import 'track_normalization.dart';
 
 enum LibraryPlatform { windows, android }
@@ -56,6 +57,10 @@ class TrackMetadata {
     this.durationMs,
     this.container,
     this.codec,
+    this.bitrateKbps,
+    this.sampleRateHz,
+    this.channels,
+    this.isLossless,
     this.state = MetadataState.ready,
   });
 
@@ -65,7 +70,18 @@ class TrackMetadata {
   final int? durationMs;
   final String? container;
   final String? codec;
+  final int? bitrateKbps;
+  final int? sampleRateHz;
+  final int? channels;
+  final bool? isLossless;
   final MetadataState state;
+
+  AudioQuality get quality => AudioQuality(
+    bitrateKbps: bitrateKbps,
+    sampleRateHz: sampleRateHz,
+    channels: channels,
+    isLossless: isLossless,
+  );
 }
 
 /// Null metadata preserves unchanged tags, but clears stale tags on stat change.
@@ -110,6 +126,8 @@ class LocalAudioFile {
 
   String get displayTitle =>
       metadata.title.trim().isEmpty ? fileName : metadata.title;
+
+  AudioQuality get quality => metadata.quality;
 }
 
 /// A bounded extraction snapshot tied to one accessible directory generation.
@@ -118,11 +136,16 @@ class MetadataCandidate {
     required this.file,
     required this.rootId,
     required this.scanGeneration,
+    required this.qualityReadState,
   });
 
   final LocalAudioFile file;
   final int rootId;
   final int scanGeneration;
+  final MetadataState qualityReadState;
+
+  /// A migrated v1 record already has usable tags and only needs quality data.
+  bool get isQualityRefresh => file.metadata.state == MetadataState.ready;
 }
 
 class FileScanState {

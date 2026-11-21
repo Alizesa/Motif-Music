@@ -1,50 +1,25 @@
 @Tags(['taglib-native'])
 library;
 
-import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 
-import 'package:flutter_test/flutter_test.dart';
+import 'package:drift/native.dart';
 import 'package:ffi/ffi.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:motif/library/application/library_metadata_service.dart';
+import 'package:motif/library/application/library_scan_service.dart';
+import 'package:motif/library/data/library_database.dart';
+import 'package:motif/library/data/library_repository.dart';
+import 'package:motif/library/domain/library_models.dart';
+import 'package:motif/library/platform/library_platform_source.dart';
+import 'package:motif/library/platform/taglib_metadata_reader.dart';
+import 'package:motif/library/platform/windows_library_source.dart';
 import 'package:motif_taglib/motif_taglib.dart';
 
-List<int> wavFixture({bool tagged = false}) {
-  List<int> u32(int n) =>
-      (ByteData(4)..setUint32(0, n, Endian.little)).buffer.asUint8List();
-  List<int> chunk(String name, List<int> value) => [
-    ...ascii.encode(name),
-    ...u32(value.length),
-    ...value,
-    if (value.length.isOdd) 0,
-  ];
-  final pcm = Uint8List(16000); // 8,000 mono signed-16 samples = one second.
-  final format =
-      (ByteData(16)
-            ..setUint16(0, 1, Endian.little)
-            ..setUint16(2, 1, Endian.little)
-            ..setUint32(4, 8000, Endian.little)
-            ..setUint32(8, 16000, Endian.little)
-            ..setUint16(12, 2, Endian.little)
-            ..setUint16(14, 16, Endian.little))
-          .buffer
-          .asUint8List();
-  final body = [
-    ...ascii.encode('WAVE'),
-    ...chunk('fmt ', format),
-    if (tagged)
-      ...chunk('LIST', [
-        ...ascii.encode('INFO'),
-        ...chunk('INAM', [...ascii.encode('A "song"'), 0]),
-        ...chunk('IART', [...ascii.encode('Artist'), 0]),
-        ...chunk('IPRD', [...ascii.encode('Album'), 0]),
-      ]),
-    ...chunk('data', pcm),
-  ];
-  return [...ascii.encode('RIFF'), ...u32(body.length), ...body];
-}
+import '../support/library_fixtures.dart';
+import '../support/wav_fixture.dart';
 
 void main() {
   for (final tagged in [false, true]) {
@@ -67,6 +42,9 @@ void main() {
             expect(tags['artist'], tagged ? 'Artist' : '');
             expect(tags['album'], tagged ? 'Album' : '');
             expect(tags['durationMs'], 1000);
+            expect(tags['bitrateKbps'], 128);
+            expect(tags['sampleRateHz'], 8000);
+            expect(tags['channels'], 1);
           }
           expect(await file.readAsBytes(), bytes);
           await file.rename('${file.path}.renamed');
@@ -93,6 +71,64 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+  test(
+    'native scan and parse persist tags and keep a failed file indexed',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'motif-taglib-scan-',
+      );
+      addTearDown(() => deleteTestDirectory(directory));
+      final database = LibraryDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final good = File.fromUri(directory.uri.resolve('tagged.wav'));
+      final bad = File.fromUri(directory.uri.resolve('bad.flac'));
+      await good.writeAsBytes(wavFixture(tagged: true));
+      await bad.writeAsString('not audio');
+      final repository = LibraryRepository(database);
+      final root = await repository.addDirectory(
+        location: FileLocation(
+          platform: LibraryPlatform.windows,
+          key: 'taglib-scan-test',
+          locator: directory.uri.toString(),
+        ),
+        displayName: 'Native scan fixture',
+      );
+      final scan = LibraryScanService(repository, const WindowsLibrarySource());
+      expect(await scan.scanDirectory(root.id), 2);
+      final before = await repository.filesPage();
+      expect(before, hasLength(2));
+      expect(
+        before.map((file) => file.metadata.state),
+        everyElement(MetadataState.pending),
+      );
+
+      final progress = await LibraryMetadataService(
+        repository,
+        const TagLibMetadataReader(),
+      ).run(cancellation: LibraryScanCancellation());
+      expect(progress.processed, 2);
+      expect(progress.failed, 1);
+      expect(progress.discarded, 0);
+      final after = await repository.filesPage();
+      expect(after.map((file) => file.id), before.map((file) => file.id));
+      final track = after.singleWhere((file) => file.fileName == 'tagged.wav');
+      expect(track.metadata.state, MetadataState.ready);
+      expect(track.metadata.title, 'A "song"');
+      expect(track.metadata.artist, 'Artist');
+      expect(track.metadata.album, 'Album');
+      expect(track.metadata.durationMs, 1000);
+      expect(track.metadata.bitrateKbps, 128);
+      expect(track.metadata.sampleRateHz, 8000);
+      expect(track.metadata.channels, 1);
+      expect(track.metadata.isLossless, isNull);
+      final failed = after.singleWhere((file) => file.fileName == 'bad.flac');
+      expect(failed.metadata.state, MetadataState.failed);
+      expect(await repository.fileById(failed.id), isNotNull);
+      expect((await repository.directories()).single.lastScanState, 'complete');
+      await good.rename('${good.path}.renamed');
+      await bad.delete();
+    },
+  );
   test(
     'native FD extraction borrows readonly handles and rejects writable ones',
     () async {

@@ -1,0 +1,775 @@
+{
+  "_meta": {
+    "description": "This file contains a serialized version of schema entities for drift.",
+    "version": "1.3.0"
+  },
+  "options": {
+    "store_date_time_values_as_text": false
+  },
+  "entities": [
+    {
+      "id": 0,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "library_roots",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL PRIMARY KEY AUTOINCREMENT",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "auto-increment"
+            ]
+          },
+          {
+            "name": "platform",
+            "getter_name": "platform",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (platform IN ('windows', 'android'))",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "location_key",
+            "getter_name": "locationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(location_key) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "locator",
+            "getter_name": "locator",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(locator) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "display_name",
+            "getter_name": "displayName",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "is_accessible",
+            "getter_name": "isAccessible",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 1 CHECK (is_accessible IN (0, 1))",
+            "default_dart": "const CustomExpression('1')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "scan_generation",
+            "getter_name": "scanGeneration",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "active_generation",
+            "getter_name": "activeGeneration",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_scan_state",
+            "getter_name": "lastScanState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'never' CHECK (last_scan_state IN ('never', 'running', 'complete', 'failed', 'interrupted'))",
+            "default_dart": "const CustomExpression('\\'never\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_completed_ms",
+            "getter_name": "lastCompletedMs",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "UNIQUE(platform, location_key)"
+        ],
+        "unique_keys": [
+          [
+            "platform",
+            "location_key"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "local_tracks",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL PRIMARY KEY AUTOINCREMENT",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "auto-increment"
+            ]
+          },
+          {
+            "name": "platform",
+            "getter_name": "platform",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (platform IN ('windows', 'android'))",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "location_key",
+            "getter_name": "locationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(location_key) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "locator",
+            "getter_name": "locator",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(locator) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "file_name",
+            "getter_name": "fileName",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "size_bytes",
+            "getter_name": "sizeBytes",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (size_bytes >= 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "modified_ms",
+            "getter_name": "modifiedMs",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "title",
+            "getter_name": "title",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "artist",
+            "getter_name": "artist",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "album",
+            "getter_name": "album",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "title_key",
+            "getter_name": "titleKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "artist_key",
+            "getter_name": "artistKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "album_key",
+            "getter_name": "albumKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT ''",
+            "default_dart": "const CustomExpression('\\'\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "duration_ms",
+            "getter_name": "durationMs",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (duration_ms > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "container",
+            "getter_name": "container",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "codec",
+            "getter_name": "codec",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "metadata_state",
+            "getter_name": "metadataState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending' CHECK (metadata_state IN ('pending', 'ready', 'failed'))",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "normalization_version",
+            "getter_name": "normalizationVersion",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 1",
+            "default_dart": "const CustomExpression('1')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "revision",
+            "getter_name": "revision",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 1",
+            "default_dart": "const CustomExpression('1')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "is_present",
+            "getter_name": "isPresent",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 1 CHECK (is_present IN (0, 1))",
+            "default_dart": "const CustomExpression('1')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "bitrate_kbps",
+            "getter_name": "bitrateKbps",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (bitrate_kbps > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "sample_rate_hz",
+            "getter_name": "sampleRateHz",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (sample_rate_hz > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "channels",
+            "getter_name": "channels",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (channels > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "is_lossless",
+            "getter_name": "isLossless",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "CHECK (is_lossless IN (0, 1))",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "quality_read_state",
+            "getter_name": "qualityReadState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending' CHECK (quality_read_state IN ('pending', 'ready', 'failed'))",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "UNIQUE(platform, location_key)"
+        ],
+        "unique_keys": [
+          [
+            "platform",
+            "location_key"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "references": [
+        0,
+        1
+      ],
+      "type": "table",
+      "data": {
+        "name": "root_files",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "root_id",
+            "getter_name": "rootId",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL REFERENCES library_roots(id)ON DELETE CASCADE",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              {
+                "foreign_key": {
+                  "to": {
+                    "table": "library_roots",
+                    "column": "id"
+                  },
+                  "initially_deferred": false,
+                  "on_update": null,
+                  "on_delete": "cascade"
+                }
+              }
+            ]
+          },
+          {
+            "name": "file_id",
+            "getter_name": "fileId",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL REFERENCES local_tracks(id)ON DELETE CASCADE",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              {
+                "foreign_key": {
+                  "to": {
+                    "table": "local_tracks",
+                    "column": "id"
+                  },
+                  "initially_deferred": false,
+                  "on_update": null,
+                  "on_delete": "cascade"
+                }
+              }
+            ]
+          },
+          {
+            "name": "seen_generation",
+            "getter_name": "seenGeneration",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "file_locator",
+            "getter_name": "fileLocator",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(file_locator) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": true,
+        "constraints": [
+          "PRIMARY KEY(root_id, file_id)"
+        ],
+        "explicit_pk": [
+          "root_id",
+          "file_id"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "references": [
+        2
+      ],
+      "type": "index",
+      "data": {
+        "on": 2,
+        "name": "root_files_by_file",
+        "sql": "CREATE INDEX root_files_by_file ON root_files(file_id, root_id);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 4,
+      "references": [
+        1
+      ],
+      "type": "index",
+      "data": {
+        "on": 1,
+        "name": "tracks_match_title_duration",
+        "sql": "CREATE INDEX tracks_match_title_duration\n  ON local_tracks(normalization_version, title_key, duration_ms, id)\n  WHERE is_present = 1 AND metadata_state = 'ready' AND title_key <> '';",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 5,
+      "references": [
+        1
+      ],
+      "type": "index",
+      "data": {
+        "on": 1,
+        "name": "tracks_present_page",
+        "sql": "CREATE INDEX tracks_present_page ON local_tracks(id) WHERE is_present = 1;",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 6,
+      "references": [
+        1
+      ],
+      "type": "table",
+      "data": {
+        "name": "source_track_links",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(source) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_track_id",
+            "getter_name": "sourceTrackId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (length(source_track_id) > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "file_id",
+            "getter_name": "fileId",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL REFERENCES local_tracks(id)ON DELETE RESTRICT",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              {
+                "foreign_key": {
+                  "to": {
+                    "table": "local_tracks",
+                    "column": "id"
+                  },
+                  "initially_deferred": false,
+                  "on_update": null,
+                  "on_delete": "restrict"
+                }
+              }
+            ]
+          },
+          {
+            "name": "file_revision",
+            "getter_name": "fileRevision",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "decision",
+            "getter_name": "decision",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (decision IN ('manual', 'automatic'))",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "matcher_version",
+            "getter_name": "matcherVersion",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL CHECK (matcher_version > 0)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "confirmed_ms",
+            "getter_name": "confirmedMs",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": true,
+        "constraints": [
+          "PRIMARY KEY(source, source_track_id)"
+        ],
+        "explicit_pk": [
+          "source",
+          "source_track_id"
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "references": [
+        6
+      ],
+      "type": "index",
+      "data": {
+        "on": 6,
+        "name": "source_links_by_file",
+        "sql": "CREATE INDEX source_links_by_file ON source_track_links(file_id);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 8,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "playback_settings",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL PRIMARY KEY CHECK (id = 1)",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "local_quality_mode",
+            "getter_name": "localQualityMode",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'followOnline' CHECK (local_quality_mode IN ('followOnline', 'highestLocal'))",
+            "default_dart": "const CustomExpression('\\'followOnline\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": []
+      }
+    }
+  ],
+  "fixed_sql": [
+    {
+      "name": "library_roots",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"library_roots\" (\"id\" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \"platform\" TEXT NOT NULL CHECK (platform IN ('windows', 'android')), \"location_key\" TEXT NOT NULL CHECK (length(location_key) > 0), \"locator\" TEXT NOT NULL CHECK (length(locator) > 0), \"display_name\" TEXT NOT NULL, \"is_accessible\" INTEGER NOT NULL DEFAULT 1 CHECK (is_accessible IN (0, 1)), \"scan_generation\" INTEGER NOT NULL DEFAULT 0, \"active_generation\" INTEGER, \"last_scan_state\" TEXT NOT NULL DEFAULT 'never' CHECK (last_scan_state IN ('never', 'running', 'complete', 'failed', 'interrupted')), \"last_completed_ms\" INTEGER, UNIQUE(platform, location_key));"
+        }
+      ]
+    },
+    {
+      "name": "local_tracks",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"local_tracks\" (\"id\" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, \"platform\" TEXT NOT NULL CHECK (platform IN ('windows', 'android')), \"location_key\" TEXT NOT NULL CHECK (length(location_key) > 0), \"locator\" TEXT NOT NULL CHECK (length(locator) > 0), \"file_name\" TEXT NOT NULL, \"size_bytes\" INTEGER CHECK (size_bytes >= 0), \"modified_ms\" INTEGER, \"title\" TEXT NOT NULL DEFAULT '', \"artist\" TEXT NOT NULL DEFAULT '', \"album\" TEXT NOT NULL DEFAULT '', \"title_key\" TEXT NOT NULL DEFAULT '', \"artist_key\" TEXT NOT NULL DEFAULT '', \"album_key\" TEXT NOT NULL DEFAULT '', \"duration_ms\" INTEGER CHECK (duration_ms > 0), \"container\" TEXT, \"codec\" TEXT, \"metadata_state\" TEXT NOT NULL DEFAULT 'pending' CHECK (metadata_state IN ('pending', 'ready', 'failed')), \"normalization_version\" INTEGER NOT NULL DEFAULT 1, \"revision\" INTEGER NOT NULL DEFAULT 1, \"is_present\" INTEGER NOT NULL DEFAULT 1 CHECK (is_present IN (0, 1)), \"bitrate_kbps\" INTEGER CHECK (bitrate_kbps > 0), \"sample_rate_hz\" INTEGER CHECK (sample_rate_hz > 0), \"channels\" INTEGER CHECK (channels > 0), \"is_lossless\" INTEGER CHECK (is_lossless IN (0, 1)), \"quality_read_state\" TEXT NOT NULL DEFAULT 'pending' CHECK (quality_read_state IN ('pending', 'ready', 'failed')), UNIQUE(platform, location_key));"
+        }
+      ]
+    },
+    {
+      "name": "root_files",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"root_files\" (\"root_id\" INTEGER NOT NULL REFERENCES library_roots(id)ON DELETE CASCADE, \"file_id\" INTEGER NOT NULL REFERENCES local_tracks(id)ON DELETE CASCADE, \"seen_generation\" INTEGER NOT NULL, \"file_locator\" TEXT NOT NULL CHECK (length(file_locator) > 0), PRIMARY KEY(root_id, file_id)) WITHOUT ROWID;"
+        }
+      ]
+    },
+    {
+      "name": "root_files_by_file",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX root_files_by_file ON root_files (file_id, root_id)"
+        }
+      ]
+    },
+    {
+      "name": "tracks_match_title_duration",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX tracks_match_title_duration ON local_tracks (normalization_version, title_key, duration_ms, id) WHERE is_present = 1 AND metadata_state = 'ready' AND title_key <> ''"
+        }
+      ]
+    },
+    {
+      "name": "tracks_present_page",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX tracks_present_page ON local_tracks (id) WHERE is_present = 1"
+        }
+      ]
+    },
+    {
+      "name": "source_track_links",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"source_track_links\" (\"source\" TEXT NOT NULL CHECK (length(source) > 0), \"source_track_id\" TEXT NOT NULL CHECK (length(source_track_id) > 0), \"file_id\" INTEGER NOT NULL REFERENCES local_tracks(id)ON DELETE RESTRICT, \"file_revision\" INTEGER NOT NULL, \"decision\" TEXT NOT NULL CHECK (decision IN ('manual', 'automatic')), \"matcher_version\" INTEGER NOT NULL CHECK (matcher_version > 0), \"confirmed_ms\" INTEGER NOT NULL, PRIMARY KEY(source, source_track_id)) WITHOUT ROWID;"
+        }
+      ]
+    },
+    {
+      "name": "source_links_by_file",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX source_links_by_file ON source_track_links (file_id)"
+        }
+      ]
+    },
+    {
+      "name": "playback_settings",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"playback_settings\" (\"id\" INTEGER NOT NULL PRIMARY KEY CHECK (id = 1), \"local_quality_mode\" TEXT NOT NULL DEFAULT 'followOnline' CHECK (local_quality_mode IN ('followOnline', 'highestLocal')));"
+        }
+      ]
+    }
+  ]
+}

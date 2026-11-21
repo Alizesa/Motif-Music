@@ -93,11 +93,15 @@ Future<TrackMetadata> _readWindows(LocalAudioFile file, String path) async {
 }
 
 TrackMetadata metadataFromTagLib(Map<String, Object?> value) {
-  final duration = value['durationMs'] as int?;
   return TrackMetadata(
     title: value['title'] as String? ?? '',
     artist: value['artist'] as String? ?? '',
     album: value['album'] as String? ?? '',
-    durationMs: duration != null && duration > 0 ? duration : null,
+    durationMs: _positiveInt(value['durationMs']),
+    bitrateKbps: _positiveInt(value['bitrateKbps']),
+    sampleRateHz: _positiveInt(value['sampleRateHz']),
+    channels: _positiveInt(value['channels']),
   );
 }
+
+int? _positiveInt(Object? value) => value is int && value > 0 ? value : null;

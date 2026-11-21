@@ -8,14 +8,23 @@ class LibraryDatabase extends _$LibraryDatabase {
   LibraryDatabase(super.executor);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (migrator) => migrator.createAll(),
-    // Introduce explicit, non-destructive migrations before incrementing v1.
     onUpgrade: (migrator, from, to) async {
-      throw StateError('Missing library migration from $from to $to');
+      if (from != 1 || to != 2) {
+        throw StateError('Missing library migration from $from to $to');
+      }
+      await transaction(() async {
+        await migrator.addColumn(localTracks, localTracks.bitrateKbps);
+        await migrator.addColumn(localTracks, localTracks.sampleRateHz);
+        await migrator.addColumn(localTracks, localTracks.channels);
+        await migrator.addColumn(localTracks, localTracks.isLossless);
+        await migrator.addColumn(localTracks, localTracks.qualityReadState);
+        await migrator.createTable(playbackSettings);
+      });
     },
     beforeOpen: (_) async {
       await customStatement('PRAGMA foreign_keys = ON');

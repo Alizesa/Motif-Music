@@ -1,6 +1,9 @@
 import 'package:drift/drift.dart';
 
+import '../../settings/playback_quality_settings.dart';
+import '../domain/audio_quality.dart';
 import '../domain/library_models.dart';
+import '../domain/local_playback_matcher.dart';
 import '../domain/track_normalization.dart';
 import 'library_database.dart';
 import 'library_sql.dart';
@@ -115,6 +118,7 @@ class LibraryRepository {
         throw ArgumentError.value(file.sizeBytes, 'sizeBytes');
       }
       final tags = file.metadata;
+      if (tags != null) _validateQuality(tags);
       if (tags != null &&
           (tags.state == MetadataState.pending ||
               (tags.durationMs != null && tags.durationMs! <= 0))) {
@@ -153,6 +157,11 @@ class LibraryRepository {
             tags?.codec,
             tags?.state.name ?? MetadataState.pending.name,
             TrackNormalization.version,
+            tags?.bitrateKbps,
+            tags?.sampleRateHz,
+            tags?.channels,
+            tags?.isLossless == null ? null : (tags!.isLossless! ? 1 : 0),
+            tags?.state.name ?? MetadataState.pending.name,
           ]);
           batch.customStatement(LibrarySql.markSeen, [
             session.rootId,
@@ -277,16 +286,24 @@ class LibraryRepository {
     final ids = [
       for (final row in rows)
         if (row.read<String>('metadata_state') == 'pending' ||
-            (includeFailed && row.read<String>('metadata_state') == 'failed'))
+            (includeFailed && row.read<String>('metadata_state') == 'failed') ||
+            (row.read<String>('metadata_state') == 'ready' &&
+                (row.read<String>('quality_read_state') == 'pending' ||
+                    (includeFailed &&
+                        row.read<String>('quality_read_state') == 'failed'))))
           row.read<int>('id'),
     ];
-    // Ready windows carry only IDs/states; no ready tag strings or locators
-    // cross the database boundary during startup continuation.
+    // Fully processed rows carry only IDs/states. Full details are read only
+    // for pending tags, legacy quality refreshes, or explicitly retried failures.
     final details = ids.isEmpty
         ? const <QueryRow>[]
         : await _select(
             LibrarySql.metadataDetails(List.filled(ids.length, '?').join(',')),
-            [...ids, includeFailed ? 'failed' : 'pending'],
+            [
+              ...ids,
+              includeFailed ? 'failed' : 'pending',
+              includeFailed ? 'failed' : 'pending',
+            ],
           );
     return MetadataWindow(
       afterId: rows.isEmpty ? throughId : rows.last.read<int>('id'),
@@ -296,6 +313,9 @@ class LibraryRepository {
             file: _file(row),
             rootId: row.read<int>('metadata_root_id'),
             scanGeneration: row.read<int>('metadata_generation'),
+            qualityReadState: MetadataState.values.byName(
+              row.read<String>('quality_read_state'),
+            ),
           ),
       ],
     );
@@ -306,6 +326,7 @@ class LibraryRepository {
     MetadataCandidate candidate,
     TrackMetadata metadata,
   ) async {
+    _validateQuality(metadata);
     if (metadata.state == MetadataState.pending ||
         (metadata.durationMs != null && metadata.durationMs! <= 0)) {
       throw ArgumentError(
@@ -313,15 +334,24 @@ class LibraryRepository {
       );
     }
     final f = candidate.file;
+    // A failed quality refresh must not discard already usable v1 tags/links.
+    final preserveTags =
+        candidate.isQualityRefresh && metadata.state == MetadataState.failed;
+    final assignments = preserveTags
+        ? 'quality_read_state = ?'
+        : '''
+      title = ?, artist = ?, album = ?, title_key = ?, artist_key = ?, album_key = ?,
+      duration_ms = ?, container = ?, codec = ?, metadata_state = ?, normalization_version = ?,
+      bitrate_kbps = ?, sample_rate_hz = ?, channels = ?, is_lossless = ?, quality_read_state = ?,
+      revision = revision + 1
+    ''';
     final rows = await _select(
       '''
-      UPDATE local_tracks AS t SET title = ?, artist = ?, album = ?,
-        title_key = ?, artist_key = ?, album_key = ?, duration_ms = ?,
-        container = ?, codec = ?, metadata_state = ?, normalization_version = ?,
-        revision = revision + 1
+      UPDATE local_tracks AS t SET $assignments
       WHERE t.id = ? AND t.revision = ? AND t.is_present = 1
         AND t.size_bytes IS ? AND t.modified_ms IS ?
         AND t.metadata_state = ?
+        AND t.quality_read_state = ?
         AND EXISTS (SELECT 1 FROM root_files rf
           JOIN library_roots r ON r.id = rf.root_id
           WHERE rf.file_id = t.id AND r.id = ? AND r.scan_generation = ?
@@ -330,22 +360,30 @@ class LibraryRepository {
       RETURNING id
     ''',
       [
-        metadata.title,
-        metadata.artist,
-        metadata.album,
-        TrackNormalization.key(metadata.title),
-        TrackNormalization.key(metadata.artist),
-        TrackNormalization.key(metadata.album),
-        metadata.durationMs,
-        metadata.container,
-        metadata.codec,
+        if (!preserveTags) ...[
+          metadata.title,
+          metadata.artist,
+          metadata.album,
+          TrackNormalization.key(metadata.title),
+          TrackNormalization.key(metadata.artist),
+          TrackNormalization.key(metadata.album),
+          metadata.durationMs,
+          metadata.container,
+          metadata.codec,
+          metadata.state.name,
+          TrackNormalization.version,
+          metadata.bitrateKbps,
+          metadata.sampleRateHz,
+          metadata.channels,
+          metadata.isLossless == null ? null : (metadata.isLossless! ? 1 : 0),
+        ],
         metadata.state.name,
-        TrackNormalization.version,
         f.id,
         f.revision,
         f.sizeBytes,
         f.modifiedMs,
         f.metadata.state.name,
+        candidate.qualityReadState.name,
         candidate.rootId,
         candidate.scanGeneration,
         f.location.locator,
@@ -394,6 +432,24 @@ class LibraryRepository {
           timed.length > limitPerGroup || unmeasured.length > limitPerGroup,
     );
   }
+
+  /// Evaluates a bounded, indexed snapshot without resolving any online URL.
+  /// The caller must still verify physical access immediately before playback.
+  Future<LocalPlaybackResolution> resolveLocalPlayback({
+    required TrackMetadata track,
+    required PlaybackQualityMode mode,
+    AudioQuality? onlineQuality,
+  }) async => const LocalPlaybackMatcher().resolve(
+    track: track,
+    candidates: await matchCandidates(
+      title: track.title,
+      durationMs: track.durationMs,
+      durationToleranceMs: LocalPlaybackMatcher.durationToleranceMs,
+      limitPerGroup: maxCandidatesPerGroup,
+    ),
+    mode: mode,
+    onlineQuality: onlineQuality,
+  );
 
   /// Revisions prevent a stale UI result from confirming a changed file.
   Future<void> confirmSourceMatch({
@@ -527,6 +583,14 @@ class LibraryRepository {
       durationMs: row.readNullable<int>('duration_ms'),
       container: row.readNullable<String>('container'),
       codec: row.readNullable<String>('codec'),
+      bitrateKbps: row.readNullable<int>('bitrate_kbps'),
+      sampleRateHz: row.readNullable<int>('sample_rate_hz'),
+      channels: row.readNullable<int>('channels'),
+      isLossless: switch (row.readNullable<int>('is_lossless')) {
+        1 => true,
+        0 => false,
+        _ => null,
+      },
       state: MetadataState.values.byName(row.read<String>('metadata_state')),
     ),
     revision: row.read<int>('revision'),
@@ -537,6 +601,18 @@ class LibraryRepository {
   static void _validateLocation(FileLocation location) {
     if (location.key.trim().isEmpty || location.locator.trim().isEmpty) {
       throw ArgumentError('Location key and locator cannot be empty');
+    }
+  }
+
+  static void _validateQuality(TrackMetadata metadata) {
+    for (final value in [
+      metadata.bitrateKbps,
+      metadata.sampleRateHz,
+      metadata.channels,
+    ]) {
+      if (value != null && value <= 0) {
+        throw ArgumentError('Quality metrics must be positive or unknown');
+      }
     }
   }
 

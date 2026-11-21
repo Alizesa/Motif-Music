@@ -476,7 +476,7 @@ void main() {
   });
 
   test(
-    'v1 persists across close/reopen without rebuilding the index',
+    'v2 persists across close/reopen without rebuilding the index',
     () async {
       final directory = await Directory.systemTemp.createTemp(
         'motif-library-test-',
@@ -516,7 +516,7 @@ void main() {
               .data
               .values
               .single,
-          1,
+          2,
         );
       } finally {
         await persistent.close();

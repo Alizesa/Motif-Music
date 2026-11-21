@@ -38,11 +38,18 @@ char *extract(TagLib::FileStream &stream) {
   const auto *tag = file.tag();
   const auto *audio = file.audioProperties();
   const auto duration = audio ? audio->lengthInMilliseconds() : 0;
+  const auto bitrate = audio ? audio->bitrate() : 0;
+  const auto sampleRate = audio ? audio->sampleRate() : 0;
+  const auto channels = audio ? audio->channels() : 0;
   const TagLib::String empty;
   const std::string json = "{\"title\":" + quoted(tag ? tag->title() : empty) +
       ",\"artist\":" + quoted(tag ? tag->artist() : empty) +
       ",\"album\":" + quoted(tag ? tag->album() : empty) +
-      ",\"durationMs\":" + (duration > 0 ? std::to_string(duration) : "null") + "}";
+      ",\"durationMs\":" + (duration > 0 ? std::to_string(duration) : "null") +
+      ",\"bitrateKbps\":" + (bitrate > 0 ? std::to_string(bitrate) : "null") +
+      ",\"sampleRateHz\":" +
+          (sampleRate > 0 ? std::to_string(sampleRate) : "null") +
+      ",\"channels\":" + (channels > 0 ? std::to_string(channels) : "null") + "}";
   auto *result = static_cast<char *>(std::malloc(json.size() + 1));
   if (result) std::memcpy(result, json.c_str(), json.size() + 1);
   return result;
