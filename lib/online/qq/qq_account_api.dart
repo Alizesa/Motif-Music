@@ -377,14 +377,14 @@ class QqAccountApi {
       },
     );
     final parsed = parseQqHomeFeed(data, page: page);
-    final keys = <dynamic>{
+    final keys = <String>{
       ...?previous?.uniqueKeys,
       ...parsed.uniqueKeys,
     }.toList();
     return QqHomeFeed(
       shelves: parsed.shelves,
       playlists: parsed.playlists,
-      shelfIds: <dynamic>{
+      shelfIds: <String>{
         ...?previous?.shelfIds,
         ...parsed.shelfIds,
       }.take(100).toList(),

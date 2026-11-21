@@ -57,6 +57,11 @@ jobs:
           flutter-version: 3.50.1
           cache: true
 
+      - name: Cache Gradle dependencies
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
       - name: Resolve dependencies
         run: flutter pub get
 
@@ -75,7 +80,7 @@ jobs:
           MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
           MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
           MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
-        run: flutter build apk --release --no-pub
+        run: python3 tool/retry_gradle_downloads.py flutter build apk --release --no-pub
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
