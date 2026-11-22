@@ -105,9 +105,10 @@ struct Loopback {
 };
 
 struct ProgressCell {
+  static constexpr SIZE_T kBytes = 2 * sizeof(LONG);
   volatile LONG* value;
   explicit ProgressCell(HANDLE section) : value(static_cast<volatile LONG*>(
-      MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, sizeof(LONG)))) {
+      MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, kBytes))) {
     Require(value, "map fixture progress");
   }
   ~ProgressCell() { UnmapViewOfFile(const_cast<LONG*>(value)); }
@@ -115,6 +116,10 @@ struct ProgressCell {
   ProgressCell& operator=(const ProgressCell&) = delete;
   void Mark(LONG stage) const { InterlockedExchange(value, stage); }
   LONG Read() const { return InterlockedCompareExchange(value, 0, 0); }
+  void RecordNetworkError(LONG status) const {
+    InterlockedExchange(value + 1, status);
+  }
+  LONG NetworkError() const { return InterlockedCompareExchange(value + 1, 0, 0); }
 };
 
 }  // namespace motif::lx_probe

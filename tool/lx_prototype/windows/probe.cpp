@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -69,6 +70,27 @@ struct Profile {
     DeleteAppContainerProfile(name.c_str());
   }
 };
+
+void VerifyNoLoopbackExemption(PSID sid) {
+  using GetConfig = DWORD(WINAPI*)(DWORD*, PSID_AND_ATTRIBUTES*);
+  HMODULE firewall = LoadLibraryExW(L"FirewallAPI.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  Require(firewall, "load Windows network isolation API");
+  const auto symbol = GetProcAddress(firewall, "NetworkIsolationGetAppContainerConfig");
+  GetConfig get_config = nullptr;
+  static_assert(sizeof(symbol) == sizeof(get_config));
+  std::memcpy(&get_config, &symbol, sizeof(get_config));
+  DWORD count = 0;
+  PSID_AND_ATTRIBUTES entries = nullptr;
+  const DWORD result = get_config ? get_config(&count, &entries) : ERROR_PROC_NOT_FOUND;
+  const std::unique_ptr<SID_AND_ATTRIBUTES, decltype(&LocalFree)> list(entries, LocalFree);
+  FreeLibrary(firewall);
+  if (result != ERROR_SUCCESS) SetLastError(result);
+  Require(result == ERROR_SUCCESS && (count == 0 || entries),
+          "read actual AppContainer loopback exemptions");
+  for (DWORD i = 0; i < count; ++i) {
+    Require(!EqualSid(sid, list.get()[i].Sid), "fixture has a loopback exemption");
+  }
+}
 
 struct ProbeFiles {
   std::wstring folder;
@@ -171,6 +193,30 @@ u_short BindLoopback(Loopback& listener) {
   return ntohs(listener.endpoint.sin_port);
 }
 
+bool ListenerHasConnection(SOCKET listener, long milliseconds) {
+  fd_set incoming{};
+  FD_SET(listener, &incoming);
+  timeval budget{milliseconds / 1000, (milliseconds % 1000) * 1000};
+  const int status = select(0, &incoming, nullptr, nullptr, &budget);
+  Require(status >= 0, "check the control listener");
+  return status > 0;
+}
+
+void VerifyListener(const Loopback& listener) {
+  Require(!ListenerHasConnection(listener.socket, 0),
+          "the isolated worker reached the control listener");
+  Loopback client;
+  client.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  Require(client.socket != INVALID_SOCKET &&
+              connect(client.socket, reinterpret_cast<const sockaddr*>(&listener.endpoint),
+                      sizeof(listener.endpoint)) == 0 &&
+              ListenerHasConnection(listener.socket, 1000),
+          "positive control for the loopback listener");
+  Loopback accepted;
+  accepted.socket = accept(listener.socket, nullptr, nullptr);
+  Require(accepted.socket != INVALID_SOCKET, "accept the positive control connection");
+}
+
 std::wstring WorkerEnvironment() {
   wchar_t* raw = nullptr;
   const HRESULT status =
@@ -195,9 +241,10 @@ std::wstring WorkerEnvironment() {
   return block;  // std::wstring adds the final NUL for CreateProcessAsUserW.
 }
 
-// The worker inherits only a readiness event and one numeric progress cell.
+// The worker inherits only a readiness event and a small progress section.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
-            u_short port, bool stall) {
+            const Loopback& listener, u_short port, bool stall) {
+  VerifyListener(listener);
   const Handle job(CreateJobObjectW(nullptr, nullptr));
   Require(job.value, "create fixture job");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -216,7 +263,8 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   const Handle ready(CreateEventW(&inheritable, TRUE, FALSE, nullptr));
   Require(ready.value, "create readiness signal");
   const Handle section(CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable,
-                                          PAGE_READWRITE, 0, sizeof(LONG), nullptr));
+                                          PAGE_READWRITE, 0,
+                                          static_cast<DWORD>(ProgressCell::kBytes), nullptr));
   Require(section.value, "create fixture progress section");
   const ProgressCell progress(section.value);
   HANDLE allowed_handles[]{ready.value, section.value};
@@ -260,7 +308,8 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     const HANDLE events[]{ready.value, process.value};
     const DWORD ready_result = WaitForMultipleObjects(2, events, FALSE, kStartupTimeout);
     if (ready_result != WAIT_OBJECT_0) {
-      std::fprintf(stderr, "Worker last completed startup stage %ld\n", progress.Read());
+      std::fprintf(stderr, "Worker last completed startup stage %ld (network status %ld)\n",
+                   progress.Read(), progress.NetworkError());
     }
     if (ready_result == WAIT_OBJECT_0 + 1) {
       DWORD code = 0;
@@ -285,6 +334,11 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
       SetLastError(code);
       Fail("fixture returned unexpected result");
     }
+    VerifyListener(listener);
+    const LONG network_error = progress.NetworkError();
+    Require(network_error == WSAEACCES || network_error == WSAETIMEDOUT,
+            "verify the loopback check completed");
+    std::printf("AppContainer loopback blocked (status %ld)\n", network_error);
   } catch (...) {
     // Also covers a failure before the process joined its job.
     TerminateProcess(process.value, 0x72);
@@ -310,14 +364,15 @@ int Run() {
   const Handle restricted(raw);
 
   const Profile profile(unique);
+  VerifyNoLoopbackExemption(profile.sid);
   ProbeFiles files;
   files.Prepare(unique, user_sid, SidString(profile.sid));
   const Winsock winsock;
   Loopback server;
   const auto port = BindLoopback(server);
-  Launch(restricted.value, files, profile, port, false);
-  Launch(restricted.value, files, profile, port, true);
-  Launch(restricted.value, files, profile, port, false);
+  Launch(restricted.value, files, profile, server, port, false);
+  Launch(restricted.value, files, profile, server, port, true);
+  Launch(restricted.value, files, profile, server, port, false);
   std::puts("PASS Windows token, Win32k lockdown, child process, canary, TCP, QuickJS, timeout and restart");
   return 0;
 }

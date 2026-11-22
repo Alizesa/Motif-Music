@@ -14,12 +14,14 @@ using namespace motif::lx_probe;
 
 int worker_error = 82;
 
-void VerifyLoopbackDenial(u_short port) {
+void VerifyLoopbackDenial(u_short port, const ProgressCell& progress) {
   const Winsock winsock;
   Loopback client;
   client.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (client.socket == INVALID_SOCKET) {
-    Require(WSAGetLastError() == WSAEACCES, "socket unavailable for an unknown reason");
+    const int error = WSAGetLastError();
+    progress.RecordNetworkError(error);
+    Require(error == WSAEACCES, "socket unavailable for an unknown reason");
     return;
   }
   u_long nonblocking = 1;
@@ -31,6 +33,7 @@ void VerifyLoopbackDenial(u_short port) {
                   sizeof(client.endpoint)) == SOCKET_ERROR,
           "isolated worker reached the control listener");
   int error = WSAGetLastError();
+  progress.RecordNetworkError(error);
   if (error == WSAEWOULDBLOCK) {
     fd_set writable{};
     fd_set errors{};
@@ -38,13 +41,19 @@ void VerifyLoopbackDenial(u_short port) {
     FD_SET(client.socket, &errors);
     timeval budget{1, 0};
     const int result = select(0, nullptr, &writable, &errors, &budget);
-    if (result == 0) SetLastError(ERROR_TIMEOUT);
+    if (result == 0) {
+      // The controller also verifies the exemption list and checks that its
+      // healthy listener received no connection throughout this launch.
+      progress.RecordNetworkError(WSAETIMEDOUT);
+      return;
+    }
     Require(result > 0, "loopback denial did not complete");
     int size = sizeof(error);
     Require(getsockopt(client.socket, SOL_SOCKET, SO_ERROR,
                        reinterpret_cast<char*>(&error), &size) == 0,
             "read loopback connection result");
   }
+  progress.RecordNetworkError(error);
   SetLastError(static_cast<DWORD>(error));
   Require(error == WSAEACCES, "worker could not prove a denial connecting to loopback");
 }
@@ -85,7 +94,7 @@ int Worker(wchar_t** argv) {
   worker_error = 86;
   const auto port = std::wcstoul(argv[3], nullptr, 10);
   Require(port > 0 && port <= 65535, "invalid fixture port");
-  VerifyLoopbackDenial(static_cast<u_short>(port));
+  VerifyLoopbackDenial(static_cast<u_short>(port), progress);
   progress.Mark(5);
   const std::wstring_view mode(argv[5]);
   Require(mode == L"stall" || mode == L"bounded", "invalid fixture mode");
