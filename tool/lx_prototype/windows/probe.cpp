@@ -302,7 +302,59 @@ struct Loopback {
   }
 };
 
+struct ProgressCell {
+  volatile LONG* value;
+  explicit ProgressCell(HANDLE section) : value(static_cast<volatile LONG*>(
+      MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, sizeof(LONG)))) {
+    Require(value, "map fixture progress");
+  }
+  ~ProgressCell() { UnmapViewOfFile(const_cast<LONG*>(value)); }
+  ProgressCell(const ProgressCell&) = delete;
+  ProgressCell& operator=(const ProgressCell&) = delete;
+  void Mark(LONG stage) const { InterlockedExchange(value, stage); }
+  LONG Read() const { return InterlockedCompareExchange(value, 0, 0); }
+};
+
+void VerifyLoopbackDenial(u_short port) {
+  const Winsock winsock;
+  Loopback client;
+  client.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (client.socket == INVALID_SOCKET) {
+    Require(WSAGetLastError() == WSAEACCES, "socket unavailable for an unknown reason");
+    return;
+  }
+  u_long nonblocking = 1;
+  Require(ioctlsocket(client.socket, FIONBIO, &nonblocking) == 0, "bound loopback connect");
+  client.endpoint.sin_family = AF_INET;
+  client.endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  client.endpoint.sin_port = htons(port);
+  Require(connect(client.socket, reinterpret_cast<const sockaddr*>(&client.endpoint),
+                  sizeof(client.endpoint)) == SOCKET_ERROR,
+          "isolated worker reached the control listener");
+  int error = WSAGetLastError();
+  if (error == WSAEWOULDBLOCK) {
+    fd_set writable{};
+    fd_set errors{};
+    FD_SET(client.socket, &writable);
+    FD_SET(client.socket, &errors);
+    timeval budget{1, 0};
+    const int result = select(0, nullptr, &writable, &errors, &budget);
+    if (result == 0) SetLastError(ERROR_TIMEOUT);
+    Require(result > 0, "loopback denial did not complete");
+    int size = sizeof(error);
+    Require(getsockopt(client.socket, SOL_SOCKET, SO_ERROR,
+                       reinterpret_cast<char*>(&error), &size) == 0,
+            "read loopback connection result");
+  }
+  SetLastError(static_cast<DWORD>(error));
+  Require(error == WSAEACCES, "worker could not prove a denial connecting to loopback");
+}
+
 int Worker(wchar_t** argv) {
+  const auto section = reinterpret_cast<HANDLE>(
+      static_cast<std::uintptr_t>(std::wcstoull(argv[8], nullptr, 10)));
+  const ProgressCell progress(section);
+  progress.Mark(1);
   worker_error = 83;
   PSID expected = nullptr;
   Require(ConvertStringSidToSidW(argv[3], &expected), "decode app container identity");
@@ -313,6 +365,7 @@ int Worker(wchar_t** argv) {
     throw;
   }
   LocalFree(expected);
+  progress.Mark(2);
   worker_error = 84;
   VerifyWorkerDesktop(argv[2]);
   BOOL in_job = FALSE;
@@ -322,29 +375,19 @@ int Worker(wchar_t** argv) {
                                          &child_policy, sizeof(child_policy)) &&
               child_policy.NoChildProcessCreation,
           "worker must have child process creation disabled");
+  progress.Mark(3);
 
   worker_error = 85;
   const Handle canary(CreateFileW(argv[4], GENERIC_READ, FILE_SHARE_READ,
                                 nullptr, OPEN_EXISTING, 0, nullptr));
   Require(canary.value == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
           "worker could not prove a denial reading the host-only canary");
+  progress.Mark(4);
   worker_error = 86;
   const auto port = std::wcstoul(argv[5], nullptr, 10);
   Require(port > 0 && port <= 65535, "invalid fixture port");
-  const Winsock winsock;
-  Loopback client;
-  client.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (client.socket != INVALID_SOCKET) {
-    client.endpoint.sin_family = AF_INET;
-    client.endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    client.endpoint.sin_port = htons(static_cast<u_short>(port));
-    Require(connect(client.socket, reinterpret_cast<const sockaddr*>(&client.endpoint),
-                    sizeof(client.endpoint)) == SOCKET_ERROR &&
-                WSAGetLastError() == WSAEACCES,
-            "worker could not prove a denial connecting to loopback");
-  } else {
-    Require(WSAGetLastError() == WSAEACCES, "socket unavailable for an unknown reason");
-  }
+  VerifyLoopbackDenial(htons(static_cast<u_short>(port)));
+  progress.Mark(5);
 
   const auto signal = reinterpret_cast<HANDLE>(
       static_cast<std::uintptr_t>(std::wcstoull(argv[6], nullptr, 10)));
@@ -380,8 +423,7 @@ std::wstring WorkerEnvironment() {
   return block;  // std::wstring adds the final NUL for CreateProcessAsUserW.
 }
 
-// Only the readiness signal is inherited. Fixtures report via the process exit
-// code, so the controller has no command or network IPC surface.
+// The worker inherits only a readiness event and one numeric progress cell.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
             u_short port, bool stall) {
   const Handle job(CreateJobObjectW(nullptr, nullptr));
@@ -400,8 +442,12 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
 
   SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
   const Handle ready(CreateEventW(&inheritable, TRUE, FALSE, nullptr));
-  Require(ready.value, "create the sole inherited readiness signal");
-  HANDLE allowed_handle = ready.value;
+  Require(ready.value, "create readiness signal");
+  const Handle section(CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable,
+                                          PAGE_READWRITE, 0, sizeof(LONG), nullptr));
+  Require(section.value, "create fixture progress section");
+  const ProgressCell progress(section.value);
+  HANDLE allowed_handles[]{ready.value, section.value};
   SECURITY_CAPABILITIES capabilities{profile.sid, nullptr, 0, 0};
   DWORD prohibit_children = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
   Attributes attributes;
@@ -409,14 +455,15 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
                  sizeof(capabilities));
   attributes.Set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &prohibit_children,
                  sizeof(prohibit_children));
-  attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &allowed_handle, sizeof(allowed_handle));
+  attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allowed_handles, sizeof(allowed_handles));
 
   std::wstring desktop = profile.name + L"\\Probe";
   std::wstring args = L"motif-lx-fixture --worker " + profile.name + L" " +
       SidString(profile.sid) + L" \"" + files.canary + L"\" " +
       std::to_wstring(port) + L" " +
       std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) +
-      (stall ? L" stall" : L" bounded");
+      (stall ? L" stall " : L" bounded ") +
+      std::to_wstring(reinterpret_cast<std::uintptr_t>(section.value));
   auto environment = WorkerEnvironment();
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
@@ -439,12 +486,16 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     Require(ResumeThread(thread.value) == 1, "start verified fixture");
     const HANDLE events[]{ready.value, process.value};
     const DWORD ready_result = WaitForMultipleObjects(2, events, FALSE, kStartupTimeout);
+    if (ready_result != WAIT_OBJECT_0) {
+      std::fprintf(stderr, "Worker last completed startup stage %ld\n", progress.Read());
+    }
     if (ready_result == WAIT_OBJECT_0 + 1) {
       DWORD code = 0;
       Require(GetExitCodeProcess(process.value, &code), "read worker setup result");
       SetLastError(code);
       Fail("worker exited during its security checks");
     }
+    if (ready_result == WAIT_TIMEOUT) SetLastError(ERROR_TIMEOUT);
     Require(ready_result == WAIT_OBJECT_0, "worker did not provide its sandbox evidence");
     if (stall) {
       Require(WaitForSingleObject(process.value, 200) == WAIT_TIMEOUT &&
@@ -505,7 +556,7 @@ int Run() {
 
 int wmain(int argc, wchar_t** argv) {
   try {
-    if (argc == 8 && std::wstring(argv[1]) == L"--worker") return Worker(argv);
+    if (argc == 9 && std::wstring(argv[1]) == L"--worker") return Worker(argv);
     if (argc == 1) return Run();
     return 81;
   } catch (const std::exception&) {

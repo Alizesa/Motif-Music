@@ -13,6 +13,7 @@ import android.system.Os;
 import android.system.OsConstants;
 import java.io.FileDescriptor;
 import java.net.InetAddress;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -112,8 +113,11 @@ public final class ProbeService extends Service {
             return false;
         } catch (ErrnoException error) {
             return isAccessDenied(error);
-        } catch (UnknownHostException error) {
-            return false;
+        } catch (SocketException error) {
+            return error.getCause() instanceof ErrnoException
+                    && isAccessDenied((ErrnoException) error.getCause());
+        } catch (UnknownHostException impossible) {
+            throw new AssertionError(impossible);
         } finally {
             if (fd != null) {
                 try {
