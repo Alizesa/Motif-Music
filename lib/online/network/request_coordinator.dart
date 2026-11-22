@@ -167,16 +167,14 @@ class RequestCoordinator {
   }
 
   /// Account changes discard data/queued work, without bypassing rate limits.
-  void invalidate() {
+  void invalidate({OnlineErrorKind reason = OnlineErrorKind.sessionChanged}) {
     if (_closed) return;
     _generation++;
     _cache.clear();
     _queue.clear();
     for (final job in _pending.values) {
       if (!job.done.isCompleted) {
-        job.done.completeError(
-          const OnlineException(OnlineErrorKind.sessionChanged),
-        );
+        job.done.completeError(OnlineException(reason));
       }
     }
     _pending.clear();

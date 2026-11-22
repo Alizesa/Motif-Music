@@ -5,9 +5,15 @@ import 'dart:io';
 import '../domain/online_error.dart';
 
 class QqHttpRequest {
-  QqHttpRequest({required this.uri, this.jsonBody, this.userAgent});
+  QqHttpRequest({
+    required this.uri,
+    this.jsonBody,
+    this.userAgent,
+    this.origin,
+  });
   final Uri uri;
   final String? userAgent;
+  final String? origin;
   final Map<String, Object?>? jsonBody;
 }
 
@@ -71,11 +77,17 @@ class IoQqHttpTransport implements QqHttpTransport {
           throw const OnlineException(OnlineErrorKind.transport);
         }
         outgoing.followRedirects = false;
-        outgoing.headers.set(HttpHeaders.acceptHeader, 'application/json');
+        outgoing.headers.set(
+          HttpHeaders.acceptHeader,
+          'application/json, text/plain, */*',
+        );
         if (request.userAgent != null) {
           outgoing.headers.set(HttpHeaders.userAgentHeader, request.userAgent!);
         }
         outgoing.headers.set(HttpHeaders.refererHeader, 'https://y.qq.com/');
+        if (request.origin != null) {
+          outgoing.headers.set('origin', request.origin!);
+        }
         if (request.jsonBody != null) {
           outgoing.headers.contentType = ContentType.json;
           outgoing.write(jsonEncode(request.jsonBody));

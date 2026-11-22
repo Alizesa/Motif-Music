@@ -5,13 +5,15 @@ import 'dart:typed_data';
 
 import '../qq/auth/qq_auth_error.dart';
 import '../qq/auth/qq_credential.dart';
+import '../qq/auth/qq_login_protocol.dart' show qqMusicUserAgent;
 
 class QqAccountRequest {
   const QqAccountRequest({
     required this.uri,
     this.cookie = '',
     this.referer = 'https://y.qq.com/',
-    this.userAgent = 'QQMusic 14090008(android 14)',
+    this.userAgent = qqMusicUserAgent,
+    this.origin,
     this.jsonBody,
     this.form,
   });
@@ -19,6 +21,7 @@ class QqAccountRequest {
   final String cookie;
   final String referer;
   final String userAgent;
+  final String? origin;
   final Map<String, Object?>? jsonBody;
   final Map<String, String>? form;
   @override
@@ -37,9 +40,44 @@ class QqAccountResponse {
   final List<String> setCookies;
   final String? location;
   String get text => utf8.decode(bytes);
-  String get cookie => qqCookieHeader({
-    for (final raw in setCookies) ...qqCookieValues(raw.split(';').first),
-  });
+  String get cookie {
+    final values = <String, String>{};
+    for (final raw in setCookies) {
+      final parts = raw.split(';');
+      final attributes = <String, String>{};
+      for (final part in parts.skip(1)) {
+        final separator = part.indexOf('=');
+        if (separator > 0) {
+          attributes[part.substring(0, separator).trim().toLowerCase()] = part
+              .substring(separator + 1)
+              .trim();
+        }
+      }
+      final maxAge = int.tryParse(attributes['max-age'] ?? '');
+      DateTime? expires;
+      try {
+        if (attributes['expires'] case final expiry?) {
+          expires = HttpDate.parse(expiry);
+        }
+      } on FormatException {
+        // Ignore malformed optional attributes, never the cookie value.
+      }
+      final expired = maxAge != null
+          ? maxAge <= 0
+          : expires != null && !expires.isAfter(DateTime.now());
+      for (final entry in qqCookieValues(parts.first).entries) {
+        if (entry.value.isNotEmpty && !expired) {
+          values[entry.key] = entry.value;
+        } else {
+          // check_sig can set a live graph ticket and delete a cookie with the
+          // same name on another domain. Keep the live ticket in this attempt.
+          values.putIfAbsent(entry.key, () => '');
+        }
+      }
+    }
+    return qqCookieHeader(values);
+  }
+
   @override
   String toString() => 'QqAccountResponse(status: $status, redacted)';
 }
@@ -99,8 +137,15 @@ class IoQqAccountTransport implements QqAccountTransport {
           throw const QqAuthException(QqAuthErrorKind.cancelled);
         }
         outgoing.followRedirects = false;
+        outgoing.headers.set(
+          HttpHeaders.acceptHeader,
+          'application/json, text/plain, */*',
+        );
         outgoing.headers.set(HttpHeaders.refererHeader, request.referer);
         outgoing.headers.set(HttpHeaders.userAgentHeader, request.userAgent);
+        if (request.origin != null) {
+          outgoing.headers.set('origin', request.origin!);
+        }
         final cookie = qqCookieHeader(qqCookieValues(request.cookie));
         if (cookie.isNotEmpty) {
           outgoing.headers.set(HttpHeaders.cookieHeader, cookie);
@@ -150,6 +195,12 @@ class IoQqAccountTransport implements QqAccountTransport {
       abandoned = true;
       active?.abort();
       rethrow;
+    } on TimeoutException {
+      abandoned = true;
+      active?.abort();
+      throw QqAuthException(
+        _closed ? QqAuthErrorKind.cancelled : QqAuthErrorKind.timeout,
+      );
     } catch (_) {
       abandoned = true;
       active?.abort();

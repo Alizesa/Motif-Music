@@ -24,7 +24,7 @@ class QqAuthClient {
   Future<QqQrChallenge> createQr(
     QqQrMethod method, {
     required bool Function() isActive,
-  }) async {
+  }) => _atStage(QqAuthStage.qrCode, () async {
     _active(isActive);
     if (method == QqQrMethod.qq) {
       final response = await _send(
@@ -42,11 +42,12 @@ class QqAuthClient {
             'u1': 'https://graph.qq.com/oauth2.0/login_jump',
           }),
           referer: 'https://xui.ptlogin2.qq.com/',
+          userAgent: qqBrowserUserAgent,
         ),
         isActive,
       );
       final qrsig = qqCookieValues(response.cookie)['qrsig'];
-      if (qrsig == null || !validQrImage(response.bytes)) {
+      if (qrsig == null || qrsig.isEmpty || !validQrImage(response.bytes)) {
         throw const QqAuthException(QqAuthErrorKind.malformed);
       }
       return QqQrChallenge(
@@ -67,6 +68,7 @@ class QqAuthClient {
           'href': 'https://y.qq.com/mediastyle/music_v17/src/css/popup_wechat.css#wechat_redirect',
         }),
         referer: 'https://open.weixin.qq.com/',
+        userAgent: qqBrowserUserAgent,
       ),
       isActive,
     );
@@ -83,6 +85,7 @@ class QqAuthClient {
         uri: Uri.https('open.weixin.qq.com', '/connect/qrcode/$uuid'),
         cookie: page.cookie,
         referer: 'https://open.weixin.qq.com/',
+        userAgent: qqBrowserUserAgent,
       ),
       isActive,
     );
@@ -95,25 +98,33 @@ class QqAuthClient {
       method: method,
       cookie: mergeQqCookies(page.cookie, image.cookie),
     );
-  }
+  });
 
   Future<QqQrResult> checkQr(
     QqQrChallenge challenge,
     String deviceId, {
     required bool Function() isActive,
-  }) async {
+  }) => _atStage(QqAuthStage.scan, () async {
     _active(isActive);
     if (challenge.method == QqQrMethod.wechat) {
-      final response = await _send(
-        QqAccountRequest(
-          uri: Uri.https('lp.open.weixin.qq.com', '/connect/l/qrconnect', {
-            'uuid': challenge.key,
-            '_': '${_now().millisecondsSinceEpoch}',
-          }),
-          referer: 'https://open.weixin.qq.com/',
-        ),
-        isActive,
-      );
+      QqAccountResponse response;
+      try {
+        response = await _send(
+          QqAccountRequest(
+            uri: Uri.https('lp.open.weixin.qq.com', '/connect/l/qrconnect', {
+              'uuid': challenge.key,
+              '_': '${_now().millisecondsSinceEpoch}',
+            }),
+            referer: 'https://open.weixin.qq.com/',
+            userAgent: qqBrowserUserAgent,
+          ),
+          isActive,
+        );
+      } on QqAuthException catch (error) {
+        if (error.kind != QqAuthErrorKind.timeout) rethrow;
+        _active(isActive);
+        return QqQrResult(status: QqQrStatus.waitingScan, challenge: challenge);
+      }
       final status = int.tryParse(
         RegExp(r'window\.wx_errcode\s*=\s*(\d+)')
                 .firstMatch(response.text)
@@ -170,6 +181,7 @@ class QqAuthClient {
         }),
         cookie: challenge.cookie,
         referer: 'https://xui.ptlogin2.qq.com/',
+        userAgent: qqBrowserUserAgent,
       ),
       isActive,
     );
@@ -188,68 +200,86 @@ class QqAuthClient {
         challenge: updated,
       );
     }
-    final signature = requireQqRedirect(redirect, {
-      'ssl.ptlogin2.qq.com',
-      'ssl.ptlogin2.graph.qq.com',
-    }, '/check_sig');
-    final signed = await _send(
-      QqAccountRequest(
-        uri: signature,
-        cookie: updated.cookie,
-        referer: 'https://xui.ptlogin2.qq.com/',
-      ),
-      isActive,
-      redirect: true,
-    );
-    final cookies = mergeQqCookies(updated.cookie, signed.cookie);
-    final pSkey = qqCookieValues(cookies)['p_skey'];
-    if (pSkey == null) throw const QqAuthException(QqAuthErrorKind.expired);
-    final jump = signed.location == null
-        ? Uri.https('graph.qq.com', '/oauth2.0/login_jump')
-        : requireQqRedirect(signed.location!, {
-            'graph.qq.com',
-          }, '/oauth2.0/login_jump');
-    await _send(
-      QqAccountRequest(
-        uri: jump,
-        cookie: cookies,
-        referer: 'https://graph.qq.com/oauth2.0/login_jump',
-      ),
-      isActive,
-      redirect: true,
-    );
-    final state = _nonce();
-    final authorized = await _send(
-      QqAccountRequest(
-        uri: Uri.https('graph.qq.com', '/oauth2.0/authorize'),
-        cookie: cookies,
-        referer: 'https://graph.qq.com/oauth2.0/login_jump',
-        form: {
-          'response_type': 'code',
-          'client_id': '100497308',
-          'redirect_uri': 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/',
-          'scope': 'get_user_info,get_app_friends',
-          'state': state,
-          'switch': '',
-          'from_ptlogin': '1',
-          'src': '1',
-          'update_auth': '1',
-          'openapi': '1010_1030',
-          'g_tk': '${qqQrToken(pSkey, seed: 5381)}',
-          'auth_time': '${_now().millisecondsSinceEpoch}',
-          'ui': _nonce(),
-        },
-      ),
-      isActive,
-      redirect: true,
-    );
-    final authCode = qqAuthorizationCode(authorized.location ?? '', state);
+    final authCode = await _authorizeQq(redirect, updated.cookie, isActive);
     final credential = await _exchange(authCode, deviceId, updated, isActive);
     return QqQrResult(
       status: QqQrStatus.success,
       challenge: updated,
       credential: credential,
     );
+  });
+
+  Future<String> _authorizeQq(
+    String redirect,
+    String seedCookie,
+    bool Function() active,
+  ) async {
+    final (signed, cookies, pSkey) = await _atStage(
+      QqAuthStage.signature,
+      () async {
+        final signature = requireQqRedirect(redirect, {
+          'ssl.ptlogin2.qq.com',
+          'ssl.ptlogin2.graph.qq.com',
+        }, '/check_sig');
+        final response = await _send(
+          QqAccountRequest(
+            uri: signature,
+            cookie: seedCookie,
+            referer: 'https://xui.ptlogin2.qq.com/',
+            userAgent: qqBrowserUserAgent,
+          ),
+          active,
+          redirect: true,
+        );
+        final cookies = mergeQqCookies(seedCookie, response.cookie);
+        final pSkey = qqCookieValues(cookies)['p_skey'];
+        if (pSkey == null || pSkey.isEmpty) {
+          throw const QqAuthException(QqAuthErrorKind.expired);
+        }
+        return (response, cookies, pSkey);
+      },
+    );
+    await _atStage(QqAuthStage.oauthSession, () async {
+      await _send(
+        QqAccountRequest(
+          uri: qqOAuthJumpUri(signed.location),
+          cookie: cookies,
+          referer: 'https://graph.qq.com/oauth2.0/login_jump',
+          userAgent: qqBrowserUserAgent,
+        ),
+        active,
+        redirect: true,
+      );
+    });
+    return _atStage(QqAuthStage.authorization, () async {
+      final state = _nonce();
+      final authorized = await _send(
+        QqAccountRequest(
+          uri: Uri.https('graph.qq.com', '/oauth2.0/authorize'),
+          cookie: cookies,
+          referer: 'https://graph.qq.com/oauth2.0/login_jump',
+          userAgent: qqBrowserUserAgent,
+          form: {
+            'response_type': 'code',
+            'client_id': '100497308',
+            'redirect_uri': 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/',
+            'scope': 'get_user_info,get_app_friends',
+            'state': state,
+            'switch': '',
+            'from_ptlogin': '1',
+            'src': '1',
+            'update_auth': '1',
+            'openapi': '1010_1030',
+            'g_tk': '${qqQrToken(pSkey, seed: 5381)}',
+            'auth_time': '${_now().millisecondsSinceEpoch}',
+            'ui': _nonce(),
+          },
+        ),
+        active,
+        redirect: true,
+      );
+      return qqAuthorizationCode(authorized.location ?? '', state);
+    });
   }
 
   Future<QqCredential> _exchange(
@@ -257,7 +287,7 @@ class QqAuthClient {
     String deviceId,
     QqQrChallenge challenge,
     bool Function() active,
-  ) async {
+  ) => _atStage(QqAuthStage.exchange, () async {
     final wechat = challenge.method == QqQrMethod.wechat;
     final response = await _send(
       QqAccountRequest(
@@ -283,19 +313,19 @@ class QqAuthClient {
       active,
     );
     final root = _json(response);
-    checkQqLoginResult(root, challenge.verificationCookie);
-    final result = _object(root['qrLogin']);
     final cookie = mergeQqCookies(
       challenge.verificationCookie,
       response.cookie,
     );
+    checkQqLoginResult(root, cookie);
+    final result = _object(root['qrLogin']);
     checkQqLoginResult(result, cookie);
     return QqCredential.fromLoginData(
       _object(result['data']),
       cookie: cookie,
       loginType: wechat ? 1 : 2,
     );
-  }
+  });
 
   Future<String> sendCode(
     String phone,
@@ -431,13 +461,29 @@ class QqAuthClient {
     final response = await _transport.send(request);
     _active(active);
     if (response.status == 429 || response.status == 503) {
-      throw const QqAuthException(QqAuthErrorKind.rateLimited);
+      throw QqAuthException(
+        QqAuthErrorKind.rateLimited,
+        httpStatus: response.status,
+      );
     }
-    if (response.status != 200 &&
+    if (!(response.status >= 200 && response.status < 300) &&
         !(redirect && response.status >= 300 && response.status < 400)) {
-      throw const QqAuthException(QqAuthErrorKind.rejected);
+      throw QqAuthException(
+        QqAuthErrorKind.rejected,
+        httpStatus: response.status,
+      );
     }
     return response;
+  }
+
+  Future<T> _atStage<T>(QqAuthStage stage, Future<T> Function() action) async {
+    try {
+      return await action();
+    } on QqAuthException catch (error) {
+      throw error.atStage(stage);
+    } on FormatException {
+      throw QqAuthException(QqAuthErrorKind.malformed, stage: stage);
+    }
   }
 
   Map<String, Object?> _json(QqAccountResponse response) {

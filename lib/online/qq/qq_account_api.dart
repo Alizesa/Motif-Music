@@ -14,8 +14,9 @@ import 'qq_home_models.dart';
 import 'qq_home_parser.dart';
 import 'qq_response_parser.dart';
 import 'qq_track.dart';
+import 'qq_request_protocol.dart';
 
-enum _Comm { playback, personalized, playlist }
+enum _Comm { playback, personalized, playlist, search, web }
 
 /// Authenticated QQ catalog/recommendation operations share one bounded queue.
 /// A captured epoch owns every cache entry and every response publication.
@@ -34,7 +35,11 @@ class QqAccountApi {
       if (sessions.epoch != _epoch) {
         _epoch = sessions.epoch;
         _verifiedCookie = '';
-        _coordinator.invalidate();
+        _coordinator.invalidate(
+          reason: sessions.status == QqSessionStatus.expired
+              ? OnlineErrorKind.sessionExpired
+              : OnlineErrorKind.sessionChanged,
+        );
       }
     });
   }
@@ -139,7 +144,12 @@ class QqAccountApi {
     if (snapshot.credential == null) {
       throw const OnlineException(OnlineErrorKind.authenticationRequired);
     }
-    final cacheKey = jsonEncode([snapshot.epoch, key, params]);
+    final cacheKey = jsonEncode([
+      snapshot.epoch,
+      _verificationSequence,
+      key,
+      params,
+    ]);
     final first = await _coordinator.run<_RpcOutcome>(
       cacheKey,
       ttl: ttl,
@@ -191,20 +201,35 @@ class QqAccountApi {
   }) async {
     _active(snapshot);
     final credential = snapshot.credential!;
-    final header = comm == _Comm.personalized
-        ? qqPersonalizedComm(credential)
-        : qqPlaybackComm(credential);
+    final header = switch (comm) {
+      _Comm.personalized => qqPersonalizedComm(credential),
+      _Comm.search => qqSearchComm(credential),
+      _Comm.web => qqWebComm(credential),
+      _Comm.playback || _Comm.playlist => qqPlaybackComm(credential),
+    };
+    final userAgent = switch (comm) {
+      _Comm.personalized || _Comm.web => qqWebUserAgent,
+      _Comm.search => qqSearchUserAgent,
+      _Comm.playlist => qqPlaylistUserAgent,
+      _Comm.playback => qqMusicUserAgent,
+    };
     if (comm == _Comm.playlist) {
       header['ct'] = 19;
       header['cv'] = 0;
       header.remove('v');
     }
+    final sentCookie =
+        cookie ?? mergeQqCookies(credential.cookie, _verifiedCookie);
     QqAccountResponse response;
     try {
       response = await _transport.send(
         QqAccountRequest(
           uri: Uri.https('u.y.qq.com', '/cgi-bin/musicu.fcg'),
-          cookie: cookie ?? mergeQqCookies(credential.cookie, _verifiedCookie),
+          userAgent: userAgent,
+          origin: comm == _Comm.web || comm == _Comm.personalized
+              ? 'https://y.qq.com'
+              : null,
+          cookie: sentCookie,
           jsonBody: {
             'comm': header,
             requestKey: {'module': module, 'method': method, 'param': params},
@@ -240,51 +265,96 @@ class QqAccountApi {
       throw const OnlineException(OnlineErrorKind.malformedResponse);
     }
     _active(snapshot);
-    final merged = mergeQqCookies(cookie ?? credential.cookie, response.cookie);
-    for (final item in [root]) {
-      final code = qqInt(item['code']);
-      if (code == null) {
-        throw const OnlineException(OnlineErrorKind.malformedResponse);
-      }
-      if ({301, 1000, 104400, 104401}.contains(code)) {
-        await sessions.reject(snapshot);
-        throw const OnlineException(OnlineErrorKind.sessionExpired);
-      }
-      if (code == 20276) {
-        try {
-          checkQqLoginResult(item, merged);
-        } on QqVerificationRequired catch (error) {
-          return _RpcOutcome.challenge(error.challenge);
-        } on QqAuthException {
-          throw const OnlineException(OnlineErrorKind.rejected);
-        }
-      }
-      if (code != 0) throw const OnlineException(OnlineErrorKind.rejected);
-    }
+    final merged = mergeQqCookies(sentCookie, response.cookie);
+    final topFailure = await _businessFailure(root, snapshot, merged);
+    if (topFailure != null) return topFailure;
     final sub = qqObject(root[requestKey]);
-    final subCode = qqInt(sub['code']);
-    if (subCode == null) {
+    final subFailure = await _businessFailure(sub, snapshot, merged);
+    if (subFailure != null) return subFailure;
+    final data = qqObject(sub['data']);
+    for (final field in ['code', 'subcode']) {
+      final failure = await _businessFailure(
+        data,
+        snapshot,
+        merged,
+        field: field,
+        optional: true,
+      );
+      if (failure != null) return failure;
+    }
+    if (module == 'music.vkey.GetVkey' && data['midurlinfo'] is List) {
+      for (final item in (data['midurlinfo'] as List).take(10)) {
+        if (item is! Map<String, Object?> ||
+            !qqBlockingVkeyCodes.contains(qqInt(item['result']))) {
+          continue;
+        }
+        final failure = await _businessFailure(
+          item,
+          snapshot,
+          merged,
+          field: 'result',
+          verificationFallback: data,
+        );
+        if (failure != null) return failure;
+      }
+    }
+    return _RpcOutcome.data(data);
+  }
+
+  Future<_RpcOutcome?> _businessFailure(
+    Map<String, Object?> value,
+    QqSessionSnapshot snapshot,
+    String cookie, {
+    String field = 'code',
+    bool optional = false,
+    Map<String, Object?>? verificationFallback,
+  }) async {
+    final code = qqInt(value[field]);
+    if (code == null) {
+      if (optional) return null;
       throw const OnlineException(OnlineErrorKind.malformedResponse);
     }
-    if ({301, 1000, 104400, 104401}.contains(subCode)) {
+    if (code == 0) return null;
+    final challenge =
+        qqRequestSecurityChallenge(value, cookie, code: code) ??
+        (verificationFallback == null
+            ? null
+            : qqRequestSecurityChallenge(
+                verificationFallback,
+                cookie,
+                code: code,
+              ));
+    if (challenge != null) return _RpcOutcome.challenge(challenge);
+    if (qqCredentialExpiredCodes.contains(code)) {
       await sessions.reject(snapshot);
       throw const OnlineException(OnlineErrorKind.sessionExpired);
     }
-    if (subCode == 20276) {
-      try {
-        checkQqLoginResult(sub, merged);
-      } on QqVerificationRequired catch (error) {
-        return _RpcOutcome.challenge(error.challenge);
-      } on QqAuthException {
-        throw const OnlineException(OnlineErrorKind.rejected);
-      }
+    if (qqBusinessRateLimitCodes.contains(code)) {
+      throw const OnlineException(OnlineErrorKind.rateLimited);
     }
-    if (subCode != 0) throw const OnlineException(OnlineErrorKind.rejected);
-    final data = qqObject(qqObject(root[requestKey])['data']);
-    if ((qqInt(data['code']) ?? 0) != 0 || (qqInt(data['subcode']) ?? 0) != 0) {
+    throw const OnlineException(OnlineErrorKind.rejected);
+  }
+
+  Future<QqSearchPage> search(
+    String query, {
+    int page = 1,
+    int pageSize = 30,
+  }) async {
+    final text = qqSearchQuery(query, page: page, pageSize: pageSize);
+    final data = await _call(
+      'search:$text:$page:$pageSize',
+      'music.search.SearchCgiService',
+      'DoSearchForQQMusicDesktop',
+      qqSearchParameters(text, page, pageSize),
+      requestKey: 'SONG',
+      comm: _Comm.search,
+      ttl: const Duration(minutes: 10),
+    );
+    if (data['meta'] is Map &&
+        (qqInt((data['meta'] as Map)['is_filter']) ?? 0) < 0) {
       throw const OnlineException(OnlineErrorKind.rejected);
     }
-    return _RpcOutcome.data(data);
+    return parseQqSearchPage(data, page, pageSize);
   }
 
   Future<List<QqTrack>> daily() async {
@@ -296,7 +366,10 @@ class QqAccountApi {
       'CgiGetDiss',
       {
         'new_format': 1,
-        'enc_host_uin': credential.values['encryptUin'] ?? credential.accountId,
+        'enc_host_uin':
+            qqText(credential.values['encryptUin']) ??
+            qqText(credential.values['encrypt_uin']) ??
+            credential.accountId,
         'dirid': 202,
         'onlysonglist': 1,
         'optype': 0,
@@ -447,108 +520,70 @@ class QqAccountApi {
     if (reference.track != null && reference.track!.mediaMid != null) {
       return reference.track!;
     }
+    return _songDetail(
+      mid: reference.track?.mid ?? '',
+      songType: reference.track?.songType ?? 0,
+      songId: reference.songId ?? 0,
+    );
+  }
+
+  Future<QqTrack> detail(String mid, {int songType = 0}) {
+    if (!validQqMid(mid) || songType < 0) {
+      throw ArgumentError('Invalid song identity');
+    }
+    return _songDetail(mid: mid, songType: songType, songId: 0);
+  }
+
+  Future<QqTrack> _songDetail({
+    required String mid,
+    required int songType,
+    required int songId,
+  }) async {
     final data = await _call(
-      'song-detail:${reference.identity}',
+      'song-detail:$mid:$songType:$songId',
       'music.pf_song_detail_svr',
       'get_song_detail_yqq',
-      {
-        'song_mid': reference.track?.mid ?? '',
-        'song_type': reference.track?.songType ?? 0,
-        'song_id': reference.songId ?? 0,
-      },
+      {'song_mid': mid, 'song_type': songType, 'song_id': songId},
       requestKey: 'req_1',
+      comm: _Comm.web,
       ttl: const Duration(hours: 1),
     );
     final track = parseQqTrack(data['track_info']);
-    if (reference.songId != null && track.songId != reference.songId) {
+    if (songId > 0 && track.songId != songId) {
       throw const OnlineException(OnlineErrorKind.malformedResponse);
     }
-    if (reference.track != null && track.mid != reference.track!.mid) {
+    if (mid.isNotEmpty && track.mid != mid || track.songType != songType) {
       throw const OnlineException(OnlineErrorKind.malformedResponse);
     }
     return track;
   }
 
   Future<OnlineStream> resolve(QqTrack track, OnlineQuality quality) async {
+    if (!validQqMid(track.mid) ||
+        track.songType < 0 ||
+        (track.mediaMid != null && !validQqMid(track.mediaMid!))) {
+      throw ArgumentError('Invalid song identity');
+    }
     final snapshot = await _prepare();
-    final (prefix, extension) = switch (quality) {
-      OnlineQuality.standard => ('M500', 'mp3'),
-      OnlineQuality.high => ('M800', 'mp3'),
-      OnlineQuality.lossless => ('F000', 'flac'),
-      OnlineQuality.hiRes => ('RS01', 'flac'),
-    };
-    final filename =
-        '$prefix${track.mediaMid ?? '${track.mid}${track.mid}'}.$extension';
     final data = await _call(
       'url:${track.identity}:${quality.name}',
       'music.vkey.GetVkey',
       'UrlGetVkey',
-      {
-        'guid': qqStableGuid(sessions.deviceId),
-        'songmid': [track.mid],
-        'songtype': [track.songType],
-        'uin': snapshot.credential!.accountId,
-        'loginflag': 1,
-        'platform': '23',
-        'h5queryversion': 1,
-        'nettype': '',
-        'cms': 0,
-        'firstlogin': 1,
-        'newver': 1,
-        'nohash': 0,
-        'quality': prefix,
-        'filename': [filename],
-      },
+      qqPlaybackParameters(
+        track,
+        quality,
+        guid: qqStableGuid(sessions.deviceId),
+        accountId: snapshot.credential!.accountId,
+      ),
       requestKey: 'req_1',
       ttl: const Duration(seconds: 30),
       captured: snapshot,
     );
-    final entries = data['midurlinfo'];
-    if (entries is! List) {
+    final uri = qqPlaybackUri(data, track, quality);
+    if (uri == null) {
       throw const OnlineException(OnlineErrorKind.unavailable);
     }
-    for (final raw in entries.take(10)) {
-      if (raw is! Map ||
-          qqInt(raw['result']) != 0 ||
-          raw['songmid'] != null && raw['songmid'] != track.mid) {
-        continue;
-      }
-      final value = qqText(raw['purl']);
-      final uri = value == null ? null : Uri.tryParse(value);
-      if (uri == null || uri.pathSegments.lastOrNull != filename) continue;
-      if (uri.hasScheme) {
-        final direct = parsePlaybackUri(value);
-        if (direct != null) {
-          return OnlineStream(
-            uri: direct,
-            sourceId: 'qq',
-            requestedQuality: quality,
-          );
-        }
-      } else if (data['sip'] is List) {
-        final servers =
-            (data['sip'] as List)
-                .map(parsePlaybackUri)
-                .whereType<Uri>()
-                .toList()
-              ..sort(
-                (a, b) => (a.scheme == 'https' ? 0 : 1).compareTo(
-                  b.scheme == 'https' ? 0 : 1,
-                ),
-              );
-        for (final server in servers.take(10)) {
-          final playable = parsePlaybackUri(server.resolve(value!).toString());
-          if (playable != null) {
-            return OnlineStream(
-              uri: playable,
-              sourceId: 'qq',
-              requestedQuality: quality,
-            );
-          }
-        }
-      }
-    }
-    throw const OnlineException(OnlineErrorKind.unavailable);
+    return OnlineStream(uri: uri, sourceId: 'qq', requestedQuality: quality);
   }
 
   void close() {

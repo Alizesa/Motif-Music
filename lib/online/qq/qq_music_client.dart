@@ -10,9 +10,11 @@ import 'qq_response_parser.dart';
 import 'qq_track.dart';
 import 'qq_account_api.dart';
 import 'auth/qq_session_manager.dart';
+import 'auth/qq_login_protocol.dart';
+import 'qq_request_protocol.dart';
 
-/// Anonymous QQ catalog and playback API. No fallback searches, tier probes,
-/// parallel ticket requests, account cookies, or automatic retries.
+/// QQ catalog and playback, with signed operations delegated to the account
+/// API. The public transport never receives account cookies.
 class QqMusicClient implements PlaybackUrlResolver {
   QqMusicClient({
     QqHttpTransport? transport,
@@ -39,14 +41,9 @@ class QqMusicClient implements PlaybackUrlResolver {
   static final _musicUri = Uri.https('u.y.qq.com', '/cgi-bin/musicu.fcg');
 
   Future<QqSearchPage> search(String query, {int page = 1, int pageSize = 30}) {
-    final text = query.trim().replaceAll(RegExp(r'\s+'), ' ');
-    if (text.isEmpty ||
-        text.length > 200 ||
-        page < 1 ||
-        page > 100 ||
-        pageSize < 1 ||
-        pageSize > 30) {
-      throw ArgumentError('Invalid search parameters');
+    final text = qqSearchQuery(query, page: page, pageSize: pageSize);
+    if (accountApi?.sessions.snapshot.credential != null) {
+      return accountApi!.search(text, page: page, pageSize: pageSize);
     }
     return _coordinator.run(
       jsonEncode(['search', text, page, pageSize]),
@@ -55,38 +52,13 @@ class QqMusicClient implements PlaybackUrlResolver {
         final root = await _json(
           QqHttpRequest(
             uri: _musicUri,
-            userAgent: 'QQMusic 20050009(android 14)',
+            userAgent: qqSearchUserAgent,
             jsonBody: {
-              'comm': {
-                'ct': 19,
-                'cv': 1859,
-                'v': 1859,
-                'uin': '0',
-                'qq': '0',
-                'authst': '',
-                'chid': '10003505',
-                'tmeAppID': 'qqmusic',
-                'tmeLoginType': 2,
-                'format': 'json',
-              },
+              'comm': qqSearchComm(),
               'SONG': {
                 'module': 'music.search.SearchCgiService',
                 'method': 'DoSearchForQQMusicDesktop',
-                'param': {
-                  'query': text,
-                  'search_type': 0,
-                  'page_num': page,
-                  'num_per_page': pageSize,
-                  'sin': (page - 1) * pageSize,
-                  'ein': page * pageSize,
-                  'highlight': 0,
-                  'cat': 2,
-                  'grp': 1,
-                  'nqc_flag': 0,
-                  'remoteplace': 'txt.mqq.all',
-                  'multi_zhida': 0,
-                  'sem': 0,
-                },
+                'param': qqSearchParameters(text, page, pageSize),
               },
             },
           ),
@@ -108,6 +80,9 @@ class QqMusicClient implements PlaybackUrlResolver {
     if (!validQqMid(mid) || songType < 0) {
       throw ArgumentError('Invalid song identity');
     }
+    if (accountApi?.sessions.snapshot.credential != null) {
+      return accountApi!.detail(mid, songType: songType);
+    }
     return _coordinator.run(
       jsonEncode(['detail', mid, songType]),
       ttl: const Duration(hours: 24),
@@ -115,7 +90,7 @@ class QqMusicClient implements PlaybackUrlResolver {
         final data = await _module(
           'music.pf_song_detail_svr',
           'get_song_detail_yqq',
-          {'song_mid': mid, 'song_type': songType},
+          {'song_mid': mid, 'song_type': songType, 'song_id': 0},
         );
         final track = parseQqTrack(data['track_info']);
         if (track.mid != mid || track.songType != songType) {
@@ -151,68 +126,13 @@ class QqMusicClient implements PlaybackUrlResolver {
       ]),
       ttl: const Duration(seconds: 30),
       request: () async {
-        final (prefix, extension) = switch (quality) {
-          OnlineQuality.standard => ('M500', 'mp3'),
-          OnlineQuality.high => ('M800', 'mp3'),
-          OnlineQuality.lossless => ('F000', 'flac'),
-          OnlineQuality.hiRes => ('RS01', 'flac'),
-        };
-        final filename =
-            '$prefix${track.mediaMid ?? '${track.mid}${track.mid}'}.$extension';
-        final data = await _module('music.vkey.GetVkey', 'UrlGetVkey', {
-          'guid': _guid,
-          'songmid': [track.mid],
-          'songtype': [track.songType],
-          'uin': '0',
-          'loginflag': 1,
-          'platform': '23',
-          'h5queryversion': 1,
-          'nettype': '',
-          'cms': 0,
-          'firstlogin': 1,
-          'newver': 1,
-          'nohash': 0,
-          'quality': prefix,
-          'filename': [filename],
-        });
-        final entries = data['midurlinfo'];
-        if (entries is! List || entries.isEmpty) {
-          throw const OnlineException(OnlineErrorKind.unavailable);
-        }
-        Uri? selected;
-        for (final item in entries.take(10)) {
-          if (item is! Map<String, Object?>) continue;
-          if (qqInt(item['result']) != 0) continue;
-          if (item['songmid'] != null && item['songmid'] != track.mid) continue;
-          final purl = qqText(item['purl']);
-          if (purl == null) continue;
-          final relative = Uri.tryParse(purl);
-          if (relative == null ||
-              relative.pathSegments.isEmpty ||
-              relative.pathSegments.last != filename) {
-            continue;
-          }
-          if (relative.hasScheme) {
-            selected = parsePlaybackUri(purl);
-          } else if (data['sip'] case final List servers) {
-            final bases =
-                servers
-                    .whereType<String>()
-                    .map(parsePlaybackUri)
-                    .whereType<Uri>()
-                    .toList()
-                  ..sort(
-                    (a, b) => (a.scheme == 'https' ? 0 : 1).compareTo(
-                      b.scheme == 'https' ? 0 : 1,
-                    ),
-                  );
-            for (final base in bases.take(10)) {
-              selected = parsePlaybackUri(base.resolve(purl).toString());
-              if (selected != null) break;
-            }
-          }
-          if (selected != null) break;
-        }
+        final data = await _module(
+          'music.vkey.GetVkey',
+          'UrlGetVkey',
+          qqPlaybackParameters(track, quality, guid: _guid, accountId: '0'),
+          mobile: true,
+        );
+        final selected = qqPlaybackUri(data, track, quality);
         if (selected == null) {
           throw const OnlineException(OnlineErrorKind.unavailable);
         }
@@ -228,29 +148,31 @@ class QqMusicClient implements PlaybackUrlResolver {
   Future<Map<String, Object?>> _module(
     String module,
     String method,
-    Map<String, Object?> params,
-  ) async {
+    Map<String, Object?> params, {
+    bool mobile = false,
+  }) async {
     final root = await _json(
       QqHttpRequest(
         uri: _musicUri,
+        userAgent: mobile ? qqMusicUserAgent : qqWebUserAgent,
+        origin: mobile ? null : 'https://y.qq.com',
         jsonBody: {
-          'comm': {
-            'ct': 24,
-            'cv': 4747474,
-            'format': 'json',
-            'inCharset': 'utf-8',
-            'outCharset': 'utf-8',
-            'platform': 'yqq.json',
-            'needNewCode': 1,
-            'uin': '0',
-          },
+          'comm': mobile ? qqPlaybackComm(null) : qqWebComm(),
           'req_1': {'module': module, 'method': method, 'param': params},
         },
       ),
     );
     final item = qqObject(root['req_1']);
     _checkCode(item);
-    return qqObject(item['data']);
+    final data = qqObject(item['data']);
+    if (mobile && data['midurlinfo'] is List) {
+      for (final row in (data['midurlinfo'] as List).take(10)) {
+        if (row is Map && qqBlockingVkeyCodes.contains(qqInt(row['result']))) {
+          _checkCode({'code': row['result']});
+        }
+      }
+    }
+    return data;
   }
 
   Future<Map<String, Object?>> _json(QqHttpRequest request) async {
@@ -285,6 +207,12 @@ class QqMusicClient implements PlaybackUrlResolver {
     final code = qqInt(value['code']);
     if (code == null) {
       throw const OnlineException(OnlineErrorKind.malformedResponse);
+    }
+    if (qqBusinessRateLimitCodes.contains(code)) {
+      throw const OnlineException(OnlineErrorKind.rateLimited);
+    }
+    if (qqCredentialExpiredCodes.contains(code)) {
+      throw const OnlineException(OnlineErrorKind.authenticationRequired);
     }
     if (code != 0) throw const OnlineException(OnlineErrorKind.rejected);
   }

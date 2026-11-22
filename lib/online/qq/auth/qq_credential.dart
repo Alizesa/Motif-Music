@@ -141,6 +141,7 @@ class QqCredential {
       'bindAccountType',
       'needRefreshKeyIn',
       'encryptUin',
+      'encrypt_uin',
       'loginType',
     ];
     if (RegExp(r'[;\x00-\x20\x7f]').hasMatch(key)) {

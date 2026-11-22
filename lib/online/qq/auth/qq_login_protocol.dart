@@ -3,6 +3,14 @@ import 'dart:typed_data';
 import 'qq_auth_error.dart';
 import 'qq_credential.dart';
 
+const qqBrowserUserAgent =
+    'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Motif/0.1';
+const qqWebUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+const qqMusicUserAgent = 'QQMusic 14090008(android 14)';
+const qqSearchUserAgent = 'QQMusic 20050009(android 14)';
+const qqPlaylistUserAgent = 'QQMusic 2005000982(android 14)';
+
 enum QqQrMethod { qq, wechat }
 
 enum QqQrStatus { waitingScan, waitingConfirm, expired, failed, success }
@@ -95,15 +103,15 @@ Map<String, Object?> qqAndroidLoginComm(
   if (login) 'tmeLoginType': loginType,
 };
 
-Map<String, Object?> qqPlaybackComm(QqCredential credential) => {
+Map<String, Object?> qqPlaybackComm(QqCredential? credential) => {
   'ct': 11,
   'cv': 14090008,
   'v': 14090008,
   'chid': '10003505',
-  'qq': credential.accountId,
-  'authst': credential.musicKey,
+  'qq': credential?.accountId ?? '',
+  'authst': credential?.musicKey ?? '',
   'tmeAppID': 'qqmusic',
-  'tmeLoginType': credential.loginType,
+  'tmeLoginType': credential?.loginType ?? 2,
   'format': 'json',
 };
 
@@ -171,6 +179,7 @@ Uri requireQqRedirect(String value, Set<String> hosts, String path) {
       uri.scheme != 'https' ||
       uri.port != 443 ||
       uri.userInfo.isNotEmpty ||
+      uri.hasFragment ||
       !hosts.contains(uri.host) ||
       uri.path != path) {
     throw const QqAuthException(QqAuthErrorKind.rejected);
@@ -178,12 +187,25 @@ Uri requireQqRedirect(String value, Set<String> hosts, String path) {
   return uri;
 }
 
+Uri qqOAuthJumpUri(String? location) {
+  final base = Uri.https('graph.qq.com', '/oauth2.0/login_jump');
+  var uri = base.resolve(location?.trim().isNotEmpty == true ? location! : '');
+  // Legacy graph redirects can advertise HTTP. Request the same endpoint over
+  // HTTPS; OAuth cookies must never be sent to a plaintext connection.
+  if (uri.scheme == 'http' && uri.port == 80) {
+    uri = uri.replace(scheme: 'https', port: 443);
+  }
+  return requireQqRedirect(uri.toString(), {
+    'graph.qq.com',
+  }, '/oauth2.0/login_jump');
+}
+
 String qqAuthorizationCode(String value, String expectedState) {
   final uri = requireQqRedirect(value, {
     'y.qq.com',
   }, '/portal/wx_redirect.html');
   final returned = uri.queryParameters['state'];
-  if (returned != null && returned != expectedState) {
+  if (returned != null && returned.isNotEmpty && returned != expectedState) {
     throw const QqAuthException(QqAuthErrorKind.rejected);
   }
   final code = uri.queryParameters['code'];
@@ -200,6 +222,8 @@ bool isQqVerificationUri(Uri uri) =>
     !uri.hasFragment &&
     (uri.host == 'qq.com' ||
         uri.host.endsWith('.qq.com') ||
+        uri.host == 'tencent.com' ||
+        uri.host.endsWith('.tencent.com') ||
         uri.host == 'qcloud.com' ||
         uri.host.endsWith('.qcloud.com'));
 
@@ -212,20 +236,45 @@ bool isQqVerificationClose(Uri uri) =>
       'finishWebView',
     }.contains(uri.pathSegments.lastOrNull);
 
+QqSecurityChallenge? qqRequestSecurityChallenge(
+  Map<String, Object?> result,
+  String cookie, {
+  required int code,
+}) {
+  final fields = switch (code) {
+    20276 => const ['securityURL', 'securityUrl'],
+    2001 => const ['feedbackURL', 'feedbackUrl'],
+    104009 => const ['validURL', 'validUrl'],
+    _ => const <String>[],
+  };
+  var current = result;
+  for (var depth = 0; depth < 4 && fields.isNotEmpty; depth++) {
+    for (final field in fields) {
+      final value = current[field];
+      var uri = value is String ? Uri.tryParse(value) : null;
+      if (uri == null || !isQqVerificationUri(uri)) continue;
+      if (code == 104009 && uri.queryParameters['_vkey_verify'] != '1') {
+        uri = uri.replace(
+          query: '${uri.query}${uri.query.isEmpty ? '' : '&'}_vkey_verify=1',
+        );
+      }
+      return QqSecurityChallenge(uri: uri, cookie: cookie);
+    }
+    final data = current['data'];
+    if (data is! Map<String, Object?>) break;
+    current = data;
+  }
+  return null;
+}
+
 void checkQqLoginResult(Map<String, Object?> result, String cookie) {
   final code = result['code'] is int
       ? result['code'] as int
       : int.tryParse('${result['code']}');
   if (code == null) throw const QqAuthException(QqAuthErrorKind.malformed);
-  if (code == 20276 && result['data'] is Map) {
-    final data = result['data'] as Map;
-    final value = data['securityURL'] ?? data['securityUrl'];
-    final uri = value is String ? Uri.tryParse(value) : null;
-    if (uri != null && isQqVerificationUri(uri)) {
-      throw QqVerificationRequired(
-        QqSecurityChallenge(uri: uri, cookie: cookie),
-      );
-    }
+  final challenge = qqRequestSecurityChallenge(result, cookie, code: code);
+  if (challenge != null) {
+    throw QqVerificationRequired(challenge);
   }
   if (code != 0) throw qqLoginFailure(code);
 }

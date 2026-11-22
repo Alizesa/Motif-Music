@@ -13,6 +13,8 @@ import 'package:motif/online/qq/auth/qq_session_manager.dart';
 import 'package:motif/online/qq/qq_account_api.dart';
 import 'package:motif/online/qq/qq_home_parser.dart';
 import 'package:motif/online/qq/qq_home_models.dart';
+import 'package:motif/online/qq/qq_music_client.dart';
+import 'package:motif/online/qq/qq_response_parser.dart';
 
 import 'online_fakes.dart';
 import 'playback_fakes.dart';
@@ -45,6 +47,44 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
       () async => qqCookieValues('musickey=bad\r\nheader=x'),
     );
   },
+  'expired duplicate cookies cannot erase a valid QQ OAuth ticket': () async {
+    for (final deletion in [
+      'p_skey=; Max-Age=0; Domain=.qq.com',
+      'p_skey=deleted; expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    ]) {
+      for (final cookies in [
+        ['p_skey=fixture-skey; Domain=.graph.qq.com', deletion],
+        [deletion, 'p_skey=fixture-skey; Domain=.graph.qq.com'],
+      ]) {
+        final response = accountResponse('', cookies: cookies);
+        _check(
+          qqCookieValues(response.cookie)['p_skey'] == 'fixture-skey',
+          'Duplicate deletion erased a live OAuth ticket',
+        );
+      }
+    }
+  },
+  'QQ OAuth accepts omitted or empty state and rejects a conflicting state':
+      () async {
+        const callback =
+            'https://y.qq.com/portal/wx_redirect.html?code=fixture-code';
+        for (final value in [callback, '$callback&state=']) {
+          _check(
+            qqAuthorizationCode(value, 'attempt-state') == 'fixture-code',
+            'A reference-compatible callback was rejected',
+          );
+        }
+        final error = await _throws<QqAuthException>(
+          () async => qqAuthorizationCode(
+            '$callback&state=other-attempt',
+            'attempt-state',
+          ),
+        );
+        _check(
+          error.kind == QqAuthErrorKind.rejected,
+          'A conflicting OAuth state was accepted',
+        );
+      },
   'secure envelope keeps one stable device across reopen': () async {
     final vault = MemoryQqVault();
     final first = QqSessionManager(vault: vault);
@@ -202,6 +242,10 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
       'Wrong QR app identity',
     );
     _check(challenge.cookie == 'qrsig=qr-fixture', 'Wrong QR attempt seed');
+    _check(
+      transport.requests.single.userAgent.startsWith('Mozilla/5.0'),
+      'QR authorization did not use a browser user agent',
+    );
     client.close();
   },
   'QQ QR waiting and expired states do not authorize': () async {
@@ -425,6 +469,11 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
           comm['authst'] == 'fixture-key',
       'Wrong radio auth envelope',
     );
+    _check(
+      transport.requests.first.userAgent == qqWebUserAgent &&
+          transport.requests.first.origin == 'https://y.qq.com',
+      'Radio headers did not match the web recommendation profile',
+    );
     api.close();
     await session.close();
   },
@@ -486,6 +535,10 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
               comm['authst'] == 'fixture-key',
           'Playlist schema drifted',
         );
+        _check(
+          transport.requests.single.userAgent == qqPlaylistUserAgent,
+          'Playlist request used a different client version',
+        );
         _check(page.hasMore && page.offset == 50, 'Playlist cursor lost');
         api.close();
         await session.close();
@@ -532,6 +585,14 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
         _check(
           track.mid == 'realMID' && track.songId == 501,
           'Song detail did not hydrate identity',
+        );
+        final comm = transport.requests.single.jsonBody!['comm'] as Map;
+        _check(
+          comm['ct'] == 24 &&
+              comm['cv'] == 4747474 &&
+              comm['uin'] == '42' &&
+              transport.requests.single.userAgent == qqWebUserAgent,
+          'Song detail did not use the reference web profile',
         );
         api.close();
         await session.close();
@@ -634,6 +695,849 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
         api.close();
         await session.close();
       },
+  'anonymous vkey uses the mobile envelope with the chosen quality': () async {
+    final transport = FakeQqTransport()
+      ..reply = (_) async => moduleResponse({
+        'midurlinfo': [
+          {'result': 0, 'songmid': 'songMid001', 'purl': 'M800media001.mp3'},
+        ],
+        'sip': ['https://audio.example/'],
+      });
+    final client = testClient(transport, TestClock());
+    try {
+      await client.resolve(parseQqTrack(songJson()), OnlineQuality.high);
+      final request = transport.requests.single;
+      final comm = request.jsonBody!['comm'] as Map;
+      _check(
+        comm['ct'] == 11 &&
+            comm['cv'] == 14090008 &&
+            comm['v'] == 14090008 &&
+            comm['qq'] == '' &&
+            comm['authst'] == '' &&
+            request.userAgent == qqMusicUserAgent,
+        'Anonymous playback mixed mobile parameters with a web envelope',
+      );
+    } finally {
+      client.close();
+    }
+  },
+  'signed search carries the current account through the private transport':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final private = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'body': {
+              'song': [songJson()],
+            },
+            'meta': {'sum': 31},
+          });
+        final public = FakeQqTransport()..reply = (_) async => searchResponse();
+        final api = QqAccountApi(
+          sessions: session,
+          transport: private,
+          coordinator: TestClock().coordinator(),
+        );
+        final client = QqMusicClient(transport: public, accountApi: api);
+        try {
+          final result = await client.search(' Song ', page: 2);
+          _check(
+            private.requests.length == 1 && public.requests.isEmpty,
+            'Signed search used the anonymous catalog transport',
+          );
+          final request = private.requests.single;
+          final comm = request.jsonBody!['comm'] as Map;
+          final module = request.jsonBody!['SONG'] as Map;
+          final params = module['param'] as Map;
+          _check(
+            comm['ct'] == 19 &&
+                comm['cv'] == 1859 &&
+                comm['v'] == 1859 &&
+                comm['qq'] == '42' &&
+                comm['uin'] == '42' &&
+                comm['authst'] == 'fixture-key' &&
+                request.userAgent == qqSearchUserAgent &&
+                request.cookie.contains('musickey=fixture-key') &&
+                module['method'] == 'DoSearchForQQMusicDesktop' &&
+                params['page_num'] == 2 &&
+                params['sin'] == 30 &&
+                result.tracks.single.mid == 'songMid001',
+            'Signed search request or response lost its protocol context',
+          );
+        } finally {
+          client.close();
+          api.close();
+          await session.close();
+        }
+      },
+  'signed MID detail uses the web profile and retains the private cookie':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final private = FakeQqAccountTransport()
+          ..reply = (request) async =>
+              accountModuleResponse(request, {'track_info': songJson()});
+        final public = FakeQqTransport()
+          ..reply = (_) async => moduleResponse({'track_info': songJson()});
+        final api = QqAccountApi(
+          sessions: session,
+          transport: private,
+          coordinator: TestClock().coordinator(),
+        );
+        final client = QqMusicClient(transport: public, accountApi: api);
+        try {
+          final result = await client.detail('songMid001');
+          _check(
+            private.requests.length == 1 && public.requests.isEmpty,
+            'Signed detail used the anonymous catalog transport',
+          );
+          final request = private.requests.single;
+          final comm = request.jsonBody!['comm'] as Map;
+          _check(
+            comm['ct'] == 24 &&
+                comm['cv'] == 4747474 &&
+                comm['uin'] == '42' &&
+                request.userAgent == qqWebUserAgent &&
+                request.origin == 'https://y.qq.com' &&
+                request.cookie.contains('musickey=fixture-key') &&
+                result.mid == 'songMid001',
+            'Signed detail profile or identity did not match',
+          );
+        } finally {
+          client.close();
+          api.close();
+          await session.close();
+        }
+      },
+  'daily recommendation preserves the alternate encrypted account field':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final attempt = await session.beginLogin();
+        await session.completeLogin(
+          attempt,
+          QqCredential.fromLoginData({
+            ...loginData(),
+            'encrypt_uin': 'fixture-encrypted-account',
+          }),
+        );
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'songlist': [songJson()],
+          });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          await api.daily();
+          final params =
+              (transport.requests.single.jsonBody!['req_0'] as Map)['param']
+                  as Map;
+          _check(
+            params['enc_host_uin'] == 'fixture-encrypted-account',
+            'Daily recommendation discarded the encrypted identity alias',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'official playback risk responses open verification and resume once':
+      () async {
+        for (final code in [2001, 104009]) {
+          for (final level in ['root', 'module', 'item']) {
+            final session = await signedSession(MemoryQqVault());
+            final transport = FakeQqAccountTransport();
+            final field = code == 2001 ? 'feedbackURL' : 'validURL';
+            final url = 'https://ssl.captcha.tencent.com/verify?fixture=1';
+            transport.reply = (request) async {
+              if (transport.requests.length > 1) {
+                return accountModuleResponse(request, {
+                  'midurlinfo': [
+                    {'result': 0, 'purl': 'M500mediaMid1.mp3'},
+                  ],
+                  'sip': ['https://audio.example/'],
+                });
+              }
+              if (level == 'root') {
+                return accountResponse({
+                  'code': code,
+                  'data': {field: url},
+                });
+              }
+              if (level == 'module') {
+                return accountModuleResponse(request, {field: url}, code: code);
+              }
+              return accountModuleResponse(request, {
+                field: url,
+                'midurlinfo': [
+                  {'result': code},
+                ],
+              });
+            };
+            var verifications = 0;
+            final api =
+                QqAccountApi(
+                    sessions: session,
+                    transport: transport,
+                    coordinator: TestClock().coordinator(),
+                  )
+                  ..verify = (challenge) async {
+                    verifications++;
+                    _check(
+                      challenge.uri.host == 'ssl.captcha.tencent.com' &&
+                          (code != 104009 ||
+                              challenge.uri.queryParameters['_vkey_verify'] ==
+                                  '1') &&
+                          challenge.cookie.contains('musickey=fixture-key'),
+                      'Verification URI or account proof context was lost',
+                    );
+                    return const QqVerificationResult(
+                      cookie: 'proof=fixture-proof',
+                    );
+                  };
+            try {
+              final result = await api.resolve(
+                playbackTrack(1),
+                OnlineQuality.standard,
+              );
+              _check(
+                verifications == 1 &&
+                    transport.requests.length == 2 &&
+                    transport.requests.last.cookie.contains(
+                      'proof=fixture-proof',
+                    ) &&
+                    result.uri.scheme == 'https',
+                'Official risk verification did not resume exactly once',
+              );
+            } finally {
+              api.close();
+              await session.close();
+            }
+          }
+        }
+      },
+  'untrusted risk URLs never receive a verification session': () async {
+    for (final url in [
+      'http://ssl.captcha.qq.com/verify',
+      'https://qq.com.evil.example/verify',
+      'https://user:secret@ssl.captcha.qq.com/verify',
+    ]) {
+      final session = await signedSession(MemoryQqVault());
+      final transport = FakeQqAccountTransport()
+        ..reply = (request) async =>
+            accountModuleResponse(request, {'feedbackURL': url}, code: 2001);
+      var verifications = 0;
+      final api =
+          QqAccountApi(
+              sessions: session,
+              transport: transport,
+              coordinator: TestClock().coordinator(),
+            )
+            ..verify = (_) async {
+              verifications++;
+              return null;
+            };
+      try {
+        final error = await _throws<OnlineException>(
+          () => api.resolve(playbackTrack(1), OnlineQuality.standard),
+        );
+        _check(
+          error.kind == OnlineErrorKind.rejected &&
+              verifications == 0 &&
+              transport.requests.length == 1 &&
+              session.account?.id == '42',
+          'Untrusted risk URL opened a page or invalidated a live account',
+        );
+      } finally {
+        api.close();
+        await session.close();
+      }
+    }
+  },
+  'vkey item expiry invalidates the owning account instead of an unavailable song':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'midurlinfo': [
+              {'result': 104400, 'purl': 'M500mediaMid1.mp3'},
+            ],
+            'sip': ['https://audio.example/'],
+          });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final error = await _throws<OnlineException>(
+            () => api.resolve(playbackTrack(1), OnlineQuality.standard),
+          );
+          _check(
+            error.kind == OnlineErrorKind.sessionExpired &&
+                session.status == QqSessionStatus.expired &&
+                transport.requests.length == 1,
+            'A rejected vkey credential was reported as a missing song',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'business rate limits stop later catalog requests without signing out': () async {
+    for (final code in [100001, 104604]) {
+      final session = await signedSession(MemoryQqVault());
+      final transport = FakeQqAccountTransport()
+        ..reply = (_) async => accountResponse({'code': code});
+      final api = QqAccountApi(
+        sessions: session,
+        transport: transport,
+        coordinator: TestClock().coordinator(),
+      );
+      try {
+        final first = await _throws<OnlineException>(api.daily);
+        final second = await _throws<OnlineException>(api.recentPlaylists);
+        _check(
+          first.kind == OnlineErrorKind.rateLimited &&
+              second.kind == OnlineErrorKind.rateLimited &&
+              transport.requests.length == 1 &&
+              session.account?.id == '42',
+          'A business rate limit bypassed cooldown or signed out the account',
+        );
+      } finally {
+        api.close();
+        await session.close();
+      }
+    }
+  },
+  'a completed proof does not repeatedly open a cached security challenge':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport();
+        transport.reply = (request) async => transport.requests.length == 1
+            ? accountModuleResponse(request, {
+                'feedbackURL': 'https://ssl.captcha.qq.com/verify',
+              }, code: 2001)
+            : accountModuleResponse(request, {'List': <Object?>[]});
+        var verifications = 0;
+        final api =
+            QqAccountApi(
+                sessions: session,
+                transport: transport,
+                coordinator: TestClock().coordinator(),
+              )
+              ..verify = (_) async {
+                verifications++;
+                return const QqVerificationResult(
+                  cookie: 'proof=fixture-proof',
+                );
+              };
+        try {
+          await api.personalizedPlaylists();
+          await api.personalizedPlaylists();
+          await api.personalizedPlaylists();
+          _check(
+            verifications == 1 && transport.requests.length == 3,
+            'An obsolete cached challenge reopened verification',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'QQ playback accepts server scheme-relative and wifi URLs over HTTPS': () async {
+    final cases = <Map<String, Object?>>[
+      {
+        'midurlinfo': [
+          {
+            'result': 0,
+            'purl': '//audio.example/M500mediaMid1.mp3?vkey=fixture',
+          },
+        ],
+      },
+      {
+        'midurlinfo': [
+          {'result': 0, 'purl': 'M500mediaMid1.mp3'},
+        ],
+        'sip': ['//audio.example/'],
+      },
+      {
+        'midurlinfo': [
+          {
+            'result': 0,
+            'purl': '',
+            'wifiurl': 'http://audio.example/M500mediaMid1.mp3',
+          },
+        ],
+      },
+    ];
+    for (final data in cases) {
+      final public = FakeQqTransport()
+        ..reply = (_) async => moduleResponse(data);
+      final client = testClient(public, TestClock());
+      final session = await signedSession(MemoryQqVault());
+      final private = FakeQqAccountTransport()
+        ..reply = (request) async => accountModuleResponse(request, data);
+      final api = QqAccountApi(
+        sessions: session,
+        transport: private,
+        coordinator: TestClock().coordinator(),
+      );
+      try {
+        final streams = [
+          await client.resolve(playbackTrack(1), OnlineQuality.standard),
+          await api.resolve(playbackTrack(1), OnlineQuality.standard),
+        ];
+        _check(
+          streams.every(
+                (stream) =>
+                    stream.uri.scheme == 'https' &&
+                    stream.uri.host == 'audio.example' &&
+                    stream.uri.pathSegments.last == 'M500mediaMid1.mp3',
+              ) &&
+              public.requests.length == 1 &&
+              private.requests.length == 1,
+          'A server URL variant was lost or triggered extra ticket requests',
+        );
+      } finally {
+        client.close();
+        api.close();
+        await session.close();
+      }
+    }
+  },
+  'QQ QR completes with duplicate ticket cookies and a legacy graph jump':
+      () async {
+        for (final jump in [
+          '/oauth2.0/login_jump?fixture=1',
+          'http://graph.qq.com/oauth2.0/login_jump?fixture=1',
+        ]) {
+          final transport = FakeQqAccountTransport()
+            ..reply = (request) async =>
+                _qqQrReply(request, jump: jump, emptyState: true);
+          final client = QqAuthClient(transport: transport);
+          try {
+            final result = await client.checkQr(
+              _qqQrChallenge(),
+              'device123456789012',
+              isActive: () => true,
+            );
+            final authorize = transport.requests[3];
+            _check(
+              result.status == QqQrStatus.success &&
+                  result.credential?.accountId == '42' &&
+                  transport.requests.length == 5 &&
+                  transport.requests.every(
+                    (request) => request.uri.scheme == 'https',
+                  ) &&
+                  authorize.form!['g_tk'] ==
+                      '${qqQrToken('fixture-skey', seed: 5381)}' &&
+                  authorize.cookie.contains('p_skey=fixture-skey') &&
+                  !transport.requests.last.cookie.contains('p_skey'),
+              'The compatible OAuth flow lost its ticket or exposed it to music exchange',
+            );
+          } finally {
+            client.close();
+          }
+        }
+      },
+  'QQ QR failures retain their safe phase and HTTP or API error code':
+      () async {
+        for (final status in [403, 302]) {
+          final transport = FakeQqAccountTransport()
+            ..reply = (request) async => _qqQrReply(
+              request,
+              authorizationStatus: status,
+              exchangeCode: 2002,
+            );
+          final client = QqAuthClient(transport: transport);
+          try {
+            final error = await _throws<QqAuthException>(
+              () => client.checkQr(
+                _qqQrChallenge(),
+                'device123456789012',
+                isActive: () => true,
+              ),
+            );
+            _check(
+              status == 403
+                  ? error.stage == QqAuthStage.authorization &&
+                        error.httpStatus == 403
+                  : error.stage == QqAuthStage.exchange &&
+                        error.apiCode == 2002,
+              'The failed protocol phase was erased',
+            );
+            _check(
+              !error.toString().contains('fixture-skey') &&
+                  !error.toString().contains('fixture-code') &&
+                  !error.toString().contains('fixture-qrsig') &&
+                  !error.toString().contains('https://'),
+              'Failure diagnostics exposed an OAuth secret or URL',
+            );
+          } finally {
+            client.close();
+          }
+        }
+      },
+  'an empty OAuth ticket expires before the authorization request': () async {
+    final transport = FakeQqAccountTransport()
+      ..reply = (request) async => request.uri.path == '/check_sig'
+          ? accountResponse('', status: 302, cookies: ['p_skey=; Max-Age=0'])
+          : _qqQrReply(request);
+    final client = QqAuthClient(transport: transport);
+    try {
+      final error = await _throws<QqAuthException>(
+        () => client.checkQr(
+          _qqQrChallenge(),
+          'device123456789012',
+          isActive: () => true,
+        ),
+      );
+      _check(
+        error.kind == QqAuthErrorKind.expired &&
+            error.stage == QqAuthStage.signature &&
+            transport.requests.length == 2,
+        'An empty ticket was sent to OAuth and misreported as login rejection',
+      );
+    } finally {
+      client.close();
+    }
+  },
+  'QR exchange verification retains the response proof cookie': () async {
+    final transport = FakeQqAccountTransport()
+      ..reply = (request) async => request.uri.host == 'u.y.qq.com'
+          ? accountResponse(
+              {
+                'code': 2001,
+                'data': {'feedbackURL': 'https://ssl.captcha.qq.com/verify'},
+              },
+              cookies: ['proof_session=fixture-server-proof; Secure'],
+            )
+          : _qqQrReply(request);
+    final client = QqAuthClient(transport: transport);
+    try {
+      final error = await _throws<QqVerificationRequired>(
+        () => client.checkQr(
+          _qqQrChallenge(),
+          'device123456789012',
+          isActive: () => true,
+        ),
+      );
+      _check(
+        error.challenge.cookie.contains('proof_session=fixture-server-proof') &&
+            !error.challenge.cookie.contains('p_skey'),
+        'Exchange verification lost its response cookie or reused a graph ticket',
+      );
+    } finally {
+      client.close();
+    }
+  },
+  'WeChat creation uses the official UUID page and isolated browser cookies': () async {
+    final transport = FakeQqAccountTransport()
+      ..reply = (request) async => request.uri.path == '/connect/qrconnect'
+          ? accountResponse(
+              '<img src="/connect/qrcode/wx_uuid">',
+              cookies: ['wx_session=fixture'],
+            )
+          : QqAccountResponse(
+              status: 200,
+              bytes: Uint8List.fromList([137, 80, 78, 71, 13, 10, 26, 10]),
+            );
+    final client = QqAuthClient(transport: transport);
+    try {
+      final qr = await client.createQr(QqQrMethod.wechat, isActive: () => true);
+      _check(
+        qr.key == 'wx_uuid' &&
+            qr.method == QqQrMethod.wechat &&
+            transport.requests.length == 2 &&
+            transport.requests.first.uri.queryParameters['scope'] ==
+                'snsapi_login' &&
+            transport.requests.last.cookie == 'wx_session=fixture' &&
+            transport.requests.every(
+              (request) => request.userAgent == qqBrowserUserAgent,
+            ),
+        'WeChat QR creation lost its UUID, browser profile or attempt cookie',
+      );
+    } finally {
+      client.close();
+    }
+  },
+  'WeChat approval exchanges a distinct login type and Android envelope':
+      () async {
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async =>
+              request.uri.host == 'lp.open.weixin.qq.com'
+              ? accountResponse(
+                  "window.wx_errcode=405;window.wx_code='fixture-code';",
+                )
+              : accountResponse({
+                  'code': 0,
+                  'qrLogin': {'code': 0, 'data': loginData()},
+                });
+        final client = QqAuthClient(transport: transport);
+        try {
+          final qr = QqQrChallenge(
+            key: 'wx_uuid',
+            image: Uint8List(8),
+            method: QqQrMethod.wechat,
+          );
+          final result = await client.checkQr(
+            qr,
+            'device123456789012',
+            isActive: () => true,
+          );
+          final request = transport.requests.last.jsonBody!;
+          final comm = request['comm'] as Map;
+          final module = request['qrLogin'] as Map;
+          _check(
+            result.credential?.loginType == 1 &&
+                comm['ct'] == 11 &&
+                comm['cv'] == 14090008 &&
+                comm['tmeLoginType'] == 1 &&
+                !comm.containsKey('tmeLoginMethod') &&
+                module['module'] == 'music.login.LoginServer' &&
+                module['method'] == 'Login',
+            'WeChat credentials were exchanged using the QQ identity type',
+          );
+        } finally {
+          client.close();
+        }
+      },
+  'WeChat long poll timeouts keep an active QR but do not mask network failures':
+      () async {
+        final qr = QqQrChallenge(
+          key: 'wx_uuid',
+          image: Uint8List(8),
+          method: QqQrMethod.wechat,
+        );
+        for (final kind in [
+          QqAuthErrorKind.timeout,
+          QqAuthErrorKind.transport,
+        ]) {
+          final transport = FakeQqAccountTransport()
+            ..reply = (_) async => throw QqAuthException(kind);
+          final client = QqAuthClient(transport: transport);
+          try {
+            if (kind == QqAuthErrorKind.timeout) {
+              final result = await client.checkQr(
+                qr,
+                'device123456789012',
+                isActive: () => true,
+              );
+              _check(
+                result.status == QqQrStatus.waitingScan &&
+                    identical(result.challenge, qr),
+                'Long poll timeout discarded the QR',
+              );
+            } else {
+              final error = await _throws<QqAuthException>(
+                () => client.checkQr(
+                  qr,
+                  'device123456789012',
+                  isActive: () => true,
+                ),
+              );
+              _check(
+                error.kind == QqAuthErrorKind.transport,
+                'A network failure was hidden as a poll timeout',
+              );
+            }
+            _check(
+              transport.requests.length == 1,
+              'Timeout recreated a QR or dispatched an exchange',
+            );
+          } finally {
+            client.close();
+          }
+        }
+      },
+  'renewal preserves account type and the reference refresh parameters':
+      () async {
+        final previous = QqCredential.fromLoginData({
+          ...loginData(),
+          'openid': 'fixture-openid',
+          'refresh_key': 'fixture-refresh',
+          'expired_at': 1234567890,
+        });
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'musickey': 'fixture-new-key',
+            'expired_at': 2000000000,
+          });
+        final client = QqAuthClient(transport: transport);
+        try {
+          final result = await client.refresh(
+            previous,
+            'device123456789012',
+            isActive: () => true,
+          );
+          final body = transport.requests.single.jsonBody!;
+          final comm = body['comm'] as Map;
+          final params = (body['phoneLogin'] as Map)['param'] as Map;
+          _check(
+            result.accountId == '42' &&
+                result.musicKey == 'fixture-new-key' &&
+                result.loginType == 2 &&
+                comm['qq'] == '42' &&
+                comm['tmeLoginType'] == 2 &&
+                comm['authst'] == 'fixture-key' &&
+                params['openid'] == 'fixture-openid' &&
+                params['refresh_key'] == 'fixture-refresh' &&
+                params['expired_in'] == 1234567890 &&
+                params['loginMode'] == 2,
+            'Renewal changed identity or dropped the reference refresh context',
+          );
+        } finally {
+          client.close();
+        }
+      },
+  'personalized playlists request the reference offset and cap eight items':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'List': List.generate(
+              12,
+              (i) => {
+                'Playlist': {
+                  'basic': {'tid': i + 1, 'title': 'Playlist $i'},
+                },
+              },
+            ),
+          });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final result = await api.personalizedPlaylists(page: 2);
+          final request = transport.requests.single.jsonBody!;
+          final comm = request['comm'] as Map;
+          final module = request['req_0'] as Map;
+          final params = module['param'] as Map;
+          _check(
+            result.length == 8 &&
+                params['From'] == 16 &&
+                params['Size'] == 8 &&
+                module['method'] == 'GetRecommendFeed' &&
+                comm['ct'] == 11 &&
+                comm['qq'] == '42',
+            'Personalized playlist request or response limit drifted',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'recent playlists request type four with the current mobile account':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'data': {
+              'geDanList': [
+                {'id': 123, 'name': '红心歌单'},
+              ],
+            },
+          });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final result = await api.recentPlaylists();
+          final request = transport.requests.single.jsonBody!;
+          final comm = request['comm'] as Map;
+          final module = request['req_1'] as Map;
+          final params = module['param'] as Map;
+          _check(
+            result.single.id == '123' &&
+                module['method'] == 'GetPlayRecentlyInfo' &&
+                params['type'] == 4 &&
+                params['requestCnt'] == 500 &&
+                comm['ct'] == 11 &&
+                comm['qq'] == '42' &&
+                transport.requests.single.userAgent == qqMusicUserAgent,
+            'Recent playlists drifted to played songs or another account',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'signed search cannot publish a response after switching accounts': () async {
+    final session = await signedSession(MemoryQqVault());
+    final pending = Completer<QqAccountResponse>();
+    final transport = FakeQqAccountTransport()..reply = (_) => pending.future;
+    final api = QqAccountApi(
+      sessions: session,
+      transport: transport,
+      coordinator: TestClock().coordinator(),
+    );
+    try {
+      final searching = _throws<OnlineException>(() => api.search('Song'));
+      await Future<void>.delayed(Duration.zero);
+      final attempt = await session.beginLogin();
+      await session.completeLogin(attempt, testCredential(id: '84'));
+      pending.complete(
+        accountModuleResponse(transport.requests.single, {
+          'body': {
+            'song': [songJson()],
+          },
+        }),
+      );
+      final error = await searching;
+      _check(
+        error.kind == OnlineErrorKind.sessionChanged &&
+            session.account?.id == '84',
+        'Old search data reached the new account',
+      );
+    } finally {
+      api.close();
+      await session.close();
+    }
+  },
+};
+
+QqQrChallenge _qqQrChallenge() => QqQrChallenge(
+  key: 'fixture-qrsig',
+  image: Uint8List(8),
+  method: QqQrMethod.qq,
+  cookie: 'qrsig=fixture-qrsig',
+);
+
+QqAccountResponse _qqQrReply(
+  QqAccountRequest request, {
+  String jump = 'https://graph.qq.com/oauth2.0/login_jump',
+  bool emptyState = false,
+  int authorizationStatus = 302,
+  int exchangeCode = 0,
+}) => switch (request.uri.path) {
+  '/ptqrlogin' => accountResponse(
+    "ptuiCB('0','0','https://ssl.ptlogin2.graph.qq.com/check_sig?ptsigx=fixture','0','','');",
+  ),
+  '/check_sig' => accountResponse(
+    '',
+    status: 302,
+    cookies: [
+      'p_skey=fixture-skey; Domain=.graph.qq.com',
+      'p_skey=; Max-Age=0; Domain=.qq.com',
+    ],
+    location: jump,
+  ),
+  '/oauth2.0/login_jump' => accountResponse(''),
+  '/oauth2.0/authorize' => accountResponse(
+    '',
+    status: authorizationStatus,
+    location:
+        'https://y.qq.com/portal/wx_redirect.html?code=fixture-code&state=${emptyState ? '' : request.form!['state']}',
+  ),
+  _ => accountResponse({
+    'code': 0,
+    'qrLogin': {'code': exchangeCode, 'data': loginData()},
+  }),
 };
 
 void _check(bool value, String message) {
