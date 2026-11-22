@@ -17,6 +17,17 @@ using namespace motif::lx_probe;
 constexpr DWORD kJobFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
                             JOB_OBJECT_LIMIT_PROCESS_MEMORY |
                             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+// Newer SDKs can include extra bits in JOB_OBJECT_UILIMIT_ALL that
+// older Windows versions reject. Require all eight documented restrictions.
+constexpr DWORD kJobUiRestrictions = JOB_OBJECT_UILIMIT_HANDLES |
+                                     JOB_OBJECT_UILIMIT_READCLIPBOARD |
+                                     JOB_OBJECT_UILIMIT_WRITECLIPBOARD |
+                                     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
+                                     JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+                                     JOB_OBJECT_UILIMIT_GLOBALATOMS |
+                                     JOB_OBJECT_UILIMIT_DESKTOP |
+                                     JOB_OBJECT_UILIMIT_EXITWINDOWS;
+static_assert(kJobUiRestrictions == 0xff);
 constexpr SIZE_T kProcessMemory = 64 * 1024 * 1024;
 constexpr DWORD kStartupTimeout = 5000;
 constexpr DWORD kFixtureTimeout = 5000;
@@ -241,23 +252,51 @@ std::wstring WorkerEnvironment() {
   return block;  // std::wstring adds the final NUL for CreateProcessAsUserW.
 }
 
+void ConfigureWorkerJob(HANDLE job) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = kJobFlags;
+  limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  limits.ProcessMemoryLimit = kProcessMemory;
+  Require(SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                  &limits, sizeof(limits)),
+          "apply worker process and memory limits");
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui{kJobUiRestrictions};
+  Require(SetInformationJobObject(job, JobObjectBasicUIRestrictions,
+                                  &ui, sizeof(ui)),
+          "apply worker UI restrictions");
+}
+
+void VerifyWorkerJob(HANDLE job, HANDLE process) {
+  BOOL in_job = FALSE;
+  Require(IsProcessInJob(process, job, &in_job) && in_job,
+          "verify fixture job membership");
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  Require(QueryInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                    &limits, sizeof(limits), nullptr),
+          "read worker process and memory limits");
+  if ((limits.BasicLimitInformation.LimitFlags & kJobFlags) != kJobFlags ||
+      limits.BasicLimitInformation.ActiveProcessLimit != 1 ||
+      limits.ProcessMemoryLimit != kProcessMemory) {
+    SetLastError(ERROR_INVALID_DATA);
+    Fail("verify worker process and memory limits");
+  }
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
+  Require(QueryInformationJobObject(job, JobObjectBasicUIRestrictions,
+                                    &ui, sizeof(ui), nullptr),
+          "read worker UI restrictions");
+  if ((ui.UIRestrictionsClass & kJobUiRestrictions) != kJobUiRestrictions) {
+    SetLastError(ERROR_INVALID_DATA);
+    Fail("verify worker UI restrictions");
+  }
+}
+
 // The worker inherits only a readiness event and a small progress section.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
             const Loopback& listener, u_short port, bool stall) {
   VerifyListener(listener);
   const Handle job(CreateJobObjectW(nullptr, nullptr));
   Require(job.value, "create fixture job");
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-  limits.BasicLimitInformation.LimitFlags = kJobFlags;
-  limits.BasicLimitInformation.ActiveProcessLimit = 1;
-  limits.ProcessMemoryLimit = kProcessMemory;
-  JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
-  ui.UIRestrictionsClass = JOB_OBJECT_UILIMIT_ALL;
-  Require(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation,
-                                  &limits, sizeof(limits)) &&
-              SetInformationJobObject(job.value, JobObjectBasicUIRestrictions,
-                                      &ui, sizeof(ui)),
-          "apply process, memory, and system UI restrictions");
+  ConfigureWorkerJob(job.value);
 
   SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
   const Handle ready(CreateEventW(&inheritable, TRUE, FALSE, nullptr));
@@ -299,9 +338,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   const Handle thread(child.hThread);
   try {
     Require(AssignProcessToJobObject(job.value, process.value), "assign fixture before resume");
-    BOOL in_job = FALSE;
-    Require(IsProcessInJob(process.value, job.value, &in_job) && in_job,
-            "verify fixture job membership");
+    VerifyWorkerJob(job.value, process.value);
     VerifyToken(process.value, profile.sid);
     VerifyMitigations(process.value);
     Require(ResumeThread(thread.value) == 1, "start verified fixture");
