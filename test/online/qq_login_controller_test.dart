@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/online/qq/auth/qq_auth_client.dart';
+import 'package:motif/online/qq/auth/qq_auth_error.dart';
 import 'package:motif/online/qq/auth/qq_login_controller.dart';
 import 'package:motif/online/qq/auth/qq_login_protocol.dart';
 import 'package:motif/online/qq/auth/qq_session_manager.dart';
@@ -120,4 +121,60 @@ void main() {
     expect(transport.requests.last.cookie, contains('verified=1'));
     expect(controller.sendWaitSeconds, greaterThan(0));
   });
+
+  test('an uncertain SMS send keeps the requested phone and accepts a delivered code', () async {
+    transport.reply = (request) async {
+      final method = (request.jsonBody!['phoneLogin'] as Map)['method'];
+      if (method == 'SendPhoneAuthCode') {
+        throw const QqAuthException(QqAuthErrorKind.timeout);
+      }
+      return accountModuleResponse(request, loginData());
+    };
+    await controller.startPhone();
+    await controller.sendCode('13800000000', '+86');
+    expect(controller.error, contains('已收到验证码'));
+    expect(controller.sendWaitSeconds, greaterThan(0));
+    await controller.sendCode('13800000000', '86');
+    expect(transport.requests, hasLength(1));
+    await controller.loginPhone('13800000000', '86', '123456');
+    expect(session.account?.id, '42');
+    expect(transport.requests, hasLength(2));
+  });
+
+  test('a verification retry can fail after an SMS was delivered without preventing login', () async {
+    controller.dispose();
+    controller = QqLoginController(
+      sessions: session,
+      client: client,
+      verify: (_) async => const QqVerificationResult(cookie: ''),
+      pollInterval: const Duration(hours: 1),
+    );
+    transport.reply = (request) async {
+      final method = (request.jsonBody!['phoneLogin'] as Map)['method'];
+      if (method == 'Login') return accountModuleResponse(request, loginData());
+      if (transport.requests.length == 1) {
+        return accountModuleResponse(request, {
+          'securityURL': 'https://ssl.captcha.qq.com/verify',
+        }, code: 20276);
+      }
+      return accountModuleResponse(request, {}, code: 100001);
+    };
+    await controller.startPhone();
+    await controller.sendCode('13800000000', '86');
+    expect(controller.error, contains('已收到验证码'));
+    await controller.loginPhone('13800000000', '86', '123456');
+    expect(session.account?.id, '42');
+    expect(transport.requests, hasLength(3));
+  });
+
+  test(
+    'invalid phone input does not start an SMS cooldown or request',
+    () async {
+      await controller.startPhone();
+      await controller.sendCode('invalid', '86');
+      expect(transport.requests, isEmpty);
+      expect(controller.sendWaitSeconds, 0);
+      expect(controller.error, contains('正确的手机号'));
+    },
+  );
 }

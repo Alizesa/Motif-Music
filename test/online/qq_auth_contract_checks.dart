@@ -9,6 +9,7 @@ import 'package:motif/online/qq/auth/qq_auth_client.dart';
 import 'package:motif/online/qq/auth/qq_auth_error.dart';
 import 'package:motif/online/qq/auth/qq_credential.dart';
 import 'package:motif/online/qq/auth/qq_login_protocol.dart';
+import 'package:motif/online/qq/auth/qq_verification_protocol.dart';
 import 'package:motif/online/qq/auth/qq_session_manager.dart';
 import 'package:motif/online/qq/qq_account_api.dart';
 import 'package:motif/online/qq/qq_home_parser.dart';
@@ -1498,6 +1499,235 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
       api.close();
       await session.close();
     }
+  },
+  'QQ approval follows the official graph intermediate redirect before exchange': () async {
+    for (final relative in [false, true]) {
+      var state = '';
+      final transport = FakeQqAccountTransport();
+      transport.reply = (request) async {
+        if (request.uri.path == '/oauth2.0/authorize') {
+          state = request.form!['state']!;
+          return accountResponse(
+            '',
+            status: 302,
+            cookies: ['oauth_session=fixture-hop'],
+            location:
+                '${relative ? '' : 'https://graph.qq.com'}/oauth2.0/authorize_jump?state=$state',
+          );
+        }
+        if (request.uri.path == '/oauth2.0/authorize_jump') {
+          _check(
+            request.cookie.contains('oauth_session=fixture-hop'),
+            'Intermediate approval lost its session cookie',
+          );
+          return accountResponse(
+            '',
+            status: 302,
+            location:
+                'https://y.qq.com/portal/wx_redirect.html?code=fixture-code&state=$state',
+          );
+        }
+        return _qqQrReply(request);
+      };
+      final client = QqAuthClient(transport: transport);
+      try {
+        final result = await client.checkQr(
+          _qqQrChallenge(),
+          'device123456789012',
+          isActive: () => true,
+        );
+        _check(
+          result.status == QqQrStatus.success && transport.requests.length == 6,
+          'The legitimate graph hop was rejected as a final callback',
+        );
+        _check(
+          !transport.requests.last.cookie.contains('oauth_session'),
+          'Graph approval cookie leaked into music exchange',
+        );
+      } finally {
+        client.close();
+      }
+    }
+  },
+  'QQ approval loops and unrelated graph routes stop without leaking cookies':
+      () async {
+        for (final path in ['/oauth2.0/authorize_jump', '/unrelated']) {
+          final transport = FakeQqAccountTransport();
+          transport.reply = (request) async {
+            if (request.uri.path == '/oauth2.0/authorize' ||
+                request.uri.path == '/oauth2.0/authorize_jump') {
+              return accountResponse(
+                '',
+                status: 302,
+                location: 'https://graph.qq.com$path',
+              );
+            }
+            return _qqQrReply(request);
+          };
+          final client = QqAuthClient(transport: transport);
+          try {
+            final error = await _throws<QqAuthException>(
+              () => client.checkQr(
+                _qqQrChallenge(),
+                'device123456789012',
+                isActive: () => true,
+              ),
+            );
+            _check(
+              error.kind == QqAuthErrorKind.rejected &&
+                  transport.requests.length <= 6,
+              'An approval loop or non-OAuth route was followed',
+            );
+          } finally {
+            client.close();
+          }
+        }
+      },
+  'OAuth form encoding preserves an explicit empty switch and special characters':
+      () async {
+        final encoded = encodeQqForm({
+          'switch': '',
+          'value': 'a b+c',
+          'text': '验证',
+        });
+        _check(
+          encoded.startsWith('switch='),
+          'Empty OAuth field became a bare query flag',
+        );
+        final values = Uri.splitQueryString(encoded);
+        _check(
+          values['switch'] == '' &&
+              values['value'] == 'a b+c' &&
+              values['text'] == '验证',
+          'Form encoding changed request values',
+        );
+      },
+  'Windows verification reads decoded and wrapped cookie snapshots': () async {
+    for (final wrapped in [false, true]) {
+      final data = {
+        'cookies': [
+          {'name': 'proof', 'value': 'fixture-proof'},
+        ],
+      };
+      final cookie = await collectQqWindowsVerificationCookies(
+        fallback: 'musicid=42',
+        urls: ['https://y.qq.com/'],
+        call: (_, _) async => wrapped ? jsonEncode({'result': data}) : data,
+      );
+      _check(
+        cookie.contains('musicid=42') && cookie.contains('proof=fixture-proof'),
+        'Valid private-context cookies were lost',
+      );
+    }
+  },
+  'closed Windows verification preserves its captured context for server retry':
+      () async {
+        var calls = 0;
+        final cookie = await collectQqWindowsVerificationCookies(
+          fallback: 'proof=fixture-snapshot',
+          urls: ['https://y.qq.com/'],
+          call: (_, _) async {
+            calls++;
+            throw StateError('closed');
+          },
+        );
+        _check(
+          cookie == 'proof=fixture-snapshot' && calls == 2,
+          'A closed view became a verification failure',
+        );
+      },
+  'alternate Windows cookie read remains inside the current approved context':
+      () async {
+        final cookie = await collectQqWindowsVerificationCookies(
+          fallback: 'musicid=42',
+          urls: ['https://y.qq.com/'],
+          call: (method, _) async {
+            if (method == 'Network.getCookies') {
+              throw StateError('method unavailable');
+            }
+            return {
+              'cookies': [
+                {
+                  'name': 'proof',
+                  'value': 'fixture-proof',
+                  'domain': '.qq.com',
+                },
+                {
+                  'name': 'unrelated',
+                  'value': 'fixture-other',
+                  'domain': '.example.com',
+                },
+              ],
+            };
+          },
+        );
+        _check(
+          cookie.contains('proof=fixture-proof') &&
+              !cookie.contains('unrelated'),
+          'A different origin entered verification context',
+        );
+      },
+  'invalid verification cookie values do not erase usable siblings': () async {
+    final cookie = await collectQqWindowsVerificationCookies(
+      fallback: 'musicid=42',
+      urls: ['https://y.qq.com/'],
+      call: (_, _) async => {
+        'cookies': [
+          {'name': 'bad', 'value': 'fake; injected=1'},
+          {'name': 'proof', 'value': 'fixture-proof'},
+        ],
+      },
+    );
+    _check(
+      cookie.contains('proof=fixture-proof') &&
+          !cookie.contains('injected') &&
+          !cookie.contains('bad='),
+      'Malformed cookie broke or injected the snapshot',
+    );
+  },
+  'Android verification preserves cookies across page closure and partial reads':
+      () async {
+        final cookie = await collectQqAndroidVerificationCookies(
+          fallback: 'musicid=42',
+          urls: ['https://y.qq.com/', 'https://c.y.qq.com/'],
+          read: (url) async {
+            if (url.contains('c.y.')) throw StateError('closed');
+            return {'proof': 'fixture-proof'};
+          },
+        );
+        _check(
+          cookie.contains('musicid=42') &&
+              cookie.contains('proof=fixture-proof'),
+          'Android discarded the valid partial snapshot',
+        );
+        final closed = await collectQqAndroidVerificationCookies(
+          fallback: cookie,
+          urls: ['https://y.qq.com/'],
+          read: (_) async => throw StateError('closed'),
+        );
+        _check(
+          closed == cookie,
+          'Android close was reported as failed verification',
+        );
+      },
+  'Windows mobile verification UA retains the actual engine version': () async {
+    final agent = qqVerificationMobileUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36',
+    );
+    _check(
+      agent.contains('Android 14') &&
+          agent.contains('Mobile') &&
+          agent.contains('Chrome/143.0.0.0') &&
+          agent.contains('QQMUSIC/140200'),
+      'Verification kept a desktop layout or fabricated a different engine',
+    );
+    final metrics = qqVerificationDeviceMetrics(420, 640);
+    _check(
+      metrics['mobile'] == true &&
+          metrics['width'] == 420 &&
+          metrics['height'] == 640,
+      'Verification dimensions lost their mobile viewport',
+    );
   },
 };
 

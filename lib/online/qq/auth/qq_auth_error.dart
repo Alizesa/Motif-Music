@@ -24,18 +24,38 @@ enum QqAuthStage {
   final String label;
 }
 
+enum QqAuthReason {
+  redirectMissing('授权响应未返回跳转'),
+  redirectInvalid('授权跳转地址异常'),
+  stateMismatch('授权状态不一致'),
+  codeMissing('授权回跳未返回凭据'),
+  redirectLoop('授权跳转循环'),
+  redirectLimit('授权跳转次数过多');
+
+  const QqAuthReason(this.label);
+  final String label;
+}
+
 class QqAuthException implements Exception {
-  const QqAuthException(this.kind, {this.apiCode, this.httpStatus, this.stage});
+  const QqAuthException(
+    this.kind, {
+    this.apiCode,
+    this.httpStatus,
+    this.stage,
+    this.reason,
+  });
   final QqAuthErrorKind kind;
   final int? apiCode;
   final int? httpStatus;
   final QqAuthStage? stage;
+  final QqAuthReason? reason;
 
   QqAuthException atStage(QqAuthStage value) => QqAuthException(
     kind,
     apiCode: apiCode,
     httpStatus: httpStatus,
     stage: stage ?? value,
+    reason: reason,
   );
 
   @override
@@ -56,6 +76,7 @@ class QqAuthException implements Exception {
       if (stage != null) stage!.label,
       if (httpStatus != null) 'HTTP $httpStatus',
       if (apiCode != null) '错误码 $apiCode',
+      if (reason != null) reason!.label,
     ];
     return details.isEmpty ? message : '$message（${details.join('，')}）';
   }

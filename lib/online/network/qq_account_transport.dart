@@ -7,6 +7,13 @@ import '../qq/auth/qq_auth_error.dart';
 import '../qq/auth/qq_credential.dart';
 import '../qq/auth/qq_login_protocol.dart' show qqMusicUserAgent;
 
+String encodeQqForm(Map<String, String> values) => values.entries
+    .map(
+      (entry) =>
+          '${Uri.encodeQueryComponent(entry.key)}=${Uri.encodeQueryComponent(entry.value)}',
+    )
+    .join('&');
+
 class QqAccountRequest {
   const QqAccountRequest({
     required this.uri,
@@ -159,7 +166,7 @@ class IoQqAccountTransport implements QqAccountTransport {
             'x-www-form-urlencoded',
             charset: 'utf-8',
           );
-          outgoing.write(Uri(queryParameters: request.form).query);
+          outgoing.write(encodeQqForm(request.form!));
         }
         final response = await outgoing.close();
         final cookies =

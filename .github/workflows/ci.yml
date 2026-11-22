@@ -31,6 +31,11 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get
 
+      - name: Set up Node for verification bridge tests
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
       - name: Verify generated database code
         run: |
           dart run build_runner build

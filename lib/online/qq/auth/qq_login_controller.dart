@@ -44,8 +44,8 @@ class QqLoginController extends ChangeNotifier {
   QqLoginUiStatus _status = QqLoginUiStatus.idle;
   String? _error;
   String _smsCookie = '';
-  String? _sentPhone;
-  String? _sentCountry;
+  String? _requestedPhone;
+  String? _requestedCountry;
 
   QqQrChallenge? get qr => _qr;
   QqLoginUiStatus get status => _status;
@@ -200,8 +200,8 @@ class QqLoginController extends ChangeNotifier {
     _working = true;
     _notify();
     _smsCookie = '';
-    _sentPhone = null;
-    _sentCountry = null;
+    _requestedPhone = null;
+    _requestedCountry = null;
     final starting = _begin();
     final generation = _generation;
     try {
@@ -218,6 +218,16 @@ class QqLoginController extends ChangeNotifier {
 
   Future<void> sendCode(String phone, String country) async {
     if (_closed || _working || sendWaitSeconds > 0) return;
+    String requestedPhone;
+    String requestedCountry;
+    try {
+      requestedPhone = qqLoginPhoneNumber(phone);
+      requestedCountry = qqLoginCountryCode(country);
+    } on QqAuthException {
+      _error = '请输入正确的手机号和地区码。';
+      _notify();
+      return;
+    }
     if (_attempt == null || !sessions.ownsAttempt(_attempt!)) {
       await startPhone();
     }
@@ -225,29 +235,47 @@ class QqLoginController extends ChangeNotifier {
     final generation = _generation;
     _working = true;
     _error = null;
+    _requestedPhone = requestedPhone;
+    _requestedCountry = requestedCountry;
+    // A response may be lost after the server sent the SMS. Bind the request
+    // before sending, keep a cooldown, and allow a received code to be checked.
+    _sendAgainAt = _now().add(const Duration(seconds: 60));
+    _countdown?.cancel();
+    _countdown = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_closed || sendWaitSeconds == 0) timer.cancel();
+      _notify();
+    });
     _notify();
     try {
       _smsCookie = await _withVerification<String>(
         generation,
         (cookie) => client.sendCode(
-          phone,
-          country,
+          requestedPhone,
+          requestedCountry,
           sessions.deviceId,
           cookie: cookie,
           isActive: () => _active(generation),
         ),
       );
       if (!_active(generation)) return;
-      _sentPhone = phone.trim();
-      _sentCountry = country.trim();
-      _sendAgainAt = _now().add(const Duration(seconds: 60));
-      _countdown?.cancel();
-      _countdown = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (_closed || sendWaitSeconds == 0) timer.cancel();
-        _notify();
-      });
     } catch (error) {
-      if (_active(generation)) _fail(error);
+      if (_active(generation)) {
+        if (error is QqAuthException &&
+            error.kind == QqAuthErrorKind.cancelled) {
+          _requestedPhone = null;
+          _requestedCountry = null;
+        }
+        _fail(error);
+        if (error is QqAuthException &&
+            {
+              QqAuthErrorKind.transport,
+              QqAuthErrorKind.timeout,
+              QqAuthErrorKind.rateLimited,
+            }.contains(error.kind)) {
+          _error = '${error.toString()} 如已收到验证码，可直接输入登录。';
+          _notify();
+        }
+      }
     } finally {
       if (!_closed && generation == _generation) {
         _working = false;
@@ -258,8 +286,19 @@ class QqLoginController extends ChangeNotifier {
 
   Future<void> loginPhone(String phone, String country, String code) async {
     if (_closed || _working || _attempt == null) return;
-    if (phone.trim() != _sentPhone || country.trim() != _sentCountry) {
-      _error = '请先为当前手机号获取验证码。';
+    String requestedPhone;
+    String requestedCountry;
+    try {
+      requestedPhone = qqLoginPhoneNumber(phone);
+      requestedCountry = qqLoginCountryCode(country);
+    } on QqAuthException {
+      _error = '请输入正确的手机号和地区码。';
+      _notify();
+      return;
+    }
+    if (requestedPhone != _requestedPhone ||
+        requestedCountry != _requestedCountry) {
+      _error = '请先为当前手机号请求验证码。';
       _notify();
       return;
     }

@@ -278,8 +278,65 @@ class QqAuthClient {
         active,
         redirect: true,
       );
-      return qqAuthorizationCode(authorized.location ?? '', state);
+      return _followQqAuthorization(authorized, cookies, state, active);
     });
+  }
+
+  Future<String> _followQqAuthorization(
+    QqAccountResponse initial,
+    String cookie,
+    String state,
+    bool Function() active,
+  ) async {
+    var response = initial;
+    var from = Uri.https('graph.qq.com', '/oauth2.0/authorize');
+    var currentCookie = cookie;
+    final visited = <String>{};
+    for (var hop = 0; hop < 6; hop++) {
+      _active(active);
+      currentCookie = mergeQqCookies(currentCookie, response.cookie);
+      Uri next;
+      try {
+        next = qqAuthorizationRedirectUri(
+          response.location ?? '',
+          from: from,
+          expectedState: state,
+        );
+      } on QqAuthException catch (error) {
+        throw QqAuthException(
+          error.kind,
+          apiCode: error.apiCode,
+          httpStatus: response.status,
+          reason: error.reason,
+        );
+      }
+      if (next.host == 'y.qq.com') {
+        // This is a code callback, not a page request. Graph cookies never go to
+        // the portal or the music exchange transport.
+        return qqAuthorizationCode(next.toString(), state);
+      }
+      if (!visited.add(next.toString())) {
+        throw const QqAuthException(
+          QqAuthErrorKind.rejected,
+          reason: QqAuthReason.redirectLoop,
+        );
+      }
+      response = await _send(
+        QqAccountRequest(
+          uri: next,
+          cookie: currentCookie,
+          referer: 'https://graph.qq.com/oauth2.0/login_jump',
+          userAgent: qqBrowserUserAgent,
+        ),
+        active,
+        redirect: true,
+      );
+      from = next;
+    }
+    throw const QqAuthException(
+      QqAuthErrorKind.rejected,
+      reason: QqAuthReason.redirectLimit,
+    );
   }
 
   Future<QqCredential> _exchange(
@@ -502,19 +559,11 @@ class QqAuthClient {
   }
 
   String _phoneNumber(String value) {
-    final text = value.trim();
-    if (!RegExp(r'^\d{6,20}$').hasMatch(text)) {
-      throw const QqAuthException(QqAuthErrorKind.rejected);
-    }
-    return text;
+    return qqLoginPhoneNumber(value);
   }
 
   String _country(String value) {
-    final text = value.trim().replaceFirst('+', '');
-    if (!RegExp(r'^\d{1,4}$').hasMatch(text)) {
-      throw const QqAuthException(QqAuthErrorKind.rejected);
-    }
-    return text;
+    return qqLoginCountryCode(value);
   }
 
   String _nonce() {

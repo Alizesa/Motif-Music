@@ -11,6 +11,22 @@ const qqMusicUserAgent = 'QQMusic 14090008(android 14)';
 const qqSearchUserAgent = 'QQMusic 20050009(android 14)';
 const qqPlaylistUserAgent = 'QQMusic 2005000982(android 14)';
 
+String qqLoginPhoneNumber(String value) {
+  final text = value.trim();
+  if (!RegExp(r'^\d{6,20}$').hasMatch(text)) {
+    throw const QqAuthException(QqAuthErrorKind.rejected);
+  }
+  return text;
+}
+
+String qqLoginCountryCode(String value) {
+  final text = value.trim().replaceFirst('+', '');
+  if (!RegExp(r'^\d{1,4}$').hasMatch(text)) {
+    throw const QqAuthException(QqAuthErrorKind.rejected);
+  }
+  return text;
+}
+
 enum QqQrMethod { qq, wechat }
 
 enum QqQrStatus { waitingScan, waitingConfirm, expired, failed, success }
@@ -201,18 +217,73 @@ Uri qqOAuthJumpUri(String? location) {
 }
 
 String qqAuthorizationCode(String value, String expectedState) {
-  final uri = requireQqRedirect(value, {
-    'y.qq.com',
-  }, '/portal/wx_redirect.html');
-  final returned = uri.queryParameters['state'];
-  if (returned != null && returned.isNotEmpty && returned != expectedState) {
-    throw const QqAuthException(QqAuthErrorKind.rejected);
+  final uri = qqAuthorizationRedirectUri(
+    value,
+    from: Uri.https('y.qq.com', '/portal/wx_redirect.html'),
+    expectedState: expectedState,
+  );
+  if (uri.host != 'y.qq.com') {
+    throw const QqAuthException(
+      QqAuthErrorKind.rejected,
+      reason: QqAuthReason.redirectInvalid,
+    );
   }
-  final code = uri.queryParameters['code'];
-  if (code == null || code.isEmpty || code.length > 2048) {
-    throw const QqAuthException(QqAuthErrorKind.malformed);
+  final codes = uri.queryParametersAll['code'];
+  if (codes == null ||
+      codes.length != 1 ||
+      codes.single.isEmpty ||
+      codes.single.length > 2048) {
+    throw const QqAuthException(
+      QqAuthErrorKind.malformed,
+      reason: QqAuthReason.codeMissing,
+    );
   }
-  return code;
+  return codes.single;
+}
+
+Uri qqAuthorizationRedirectUri(
+  String value, {
+  required Uri from,
+  required String expectedState,
+}) {
+  if (value.trim().isEmpty || value.length > 32768) {
+    throw const QqAuthException(
+      QqAuthErrorKind.rejected,
+      reason: QqAuthReason.redirectMissing,
+    );
+  }
+  var uri = from.resolve(value.trim()).removeFragment();
+  if (uri.scheme == 'http' && uri.port == 80) {
+    uri = uri.replace(scheme: 'https', port: 443);
+  }
+  final portal =
+      uri.host == 'y.qq.com' && uri.path == '/portal/wx_redirect.html';
+  final graph =
+      uri.host == 'graph.qq.com' &&
+      uri.path.startsWith('/oauth2.0/') &&
+      uri.pathSegments.every(
+        (segment) =>
+            segment != '.' && segment != '..' && !segment.contains('/'),
+      );
+  if (uri.scheme != 'https' ||
+      uri.port != 443 ||
+      uri.userInfo.isNotEmpty ||
+      (!portal && !graph)) {
+    throw const QqAuthException(
+      QqAuthErrorKind.rejected,
+      reason: QqAuthReason.redirectInvalid,
+    );
+  }
+  final states = uri.queryParametersAll['state'];
+  if (states != null &&
+      (states.length != 1 ||
+          states.single.isNotEmpty && states.single != expectedState)) {
+    throw const QqAuthException(
+      QqAuthErrorKind.rejected,
+      reason: QqAuthReason.stateMismatch,
+    );
+  }
+  return uri;
 }
 
 bool isQqVerificationUri(Uri uri) =>
