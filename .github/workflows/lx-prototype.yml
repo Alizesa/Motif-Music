@@ -71,17 +71,43 @@ jobs:
         run: |
           bash android/gradlew -p tool/lx_prototype/android "-PmotifLxMediaLibs=$RUNNER_TEMP/motif-lx/jni" :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Verify Android process isolation and controlled media
+        shell: bash
         run: |
           test -c /dev/kvm
           sudo chown "$(id -u):$(id -g)" /dev/kvm
           printf 'no\n' | avdmanager create avd -n motif-lx -k 'system-images;android-35;google_apis;x86_64'
-          emulator -avd motif-lx -no-snapshot -no-window -no-audio -gpu swiftshader_indirect -no-boot-anim >"$RUNNER_TEMP/motif-lx/emulator.log" 2>&1 &
-          trap 'adb -e emu kill >/dev/null 2>&1 || true' EXIT
-          timeout 150 adb -e wait-for-device
-          timeout 150 bash -c 'until [ "$(adb -e shell getprop sys.boot_completed | tr -d "\r")" = 1 ]; do sleep 2; done'
-          adb -e install tool/lx_prototype/android/app/build/outputs/apk/debug/app-debug.apk
-          adb -e install tool/lx_prototype/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          timeout 120 adb -e shell am instrument -w com.alizesa.motif.lxprobe.test/com.alizesa.motif.lxprobe.IsolationInstrumentation | tee "$RUNNER_TEMP/motif-lx/instrumentation.log"
+          emulator -accel-check
+          serial=emulator-5554
+          log="$RUNNER_TEMP/motif-lx/emulator.log"
+          emulator -avd motif-lx -port 5554 -accel on -no-snapshot -no-window -no-audio -gpu software -no-boot-anim >"$log" 2>&1 &
+          emulator_pid=$!
+          cleanup() {
+            local result=$?
+            if (( result != 0 )); then tail -n 100 "$log"; fi
+            timeout 10 adb -s "$serial" emu kill >/dev/null 2>&1 || true
+            kill "$emulator_pid" 2>/dev/null || true
+            return "$result"
+          }
+          trap cleanup EXIT
+          booted=0
+          for attempt in {1..90}; do
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              echo "::error::Android emulator exited before boot"
+              exit 1
+            fi
+            if [[ "$(timeout 3 adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == 1 ]]; then
+              booted=1
+              break
+            fi
+            sleep 2
+          done
+          if (( booted == 0 )); then
+            echo "::error::Android emulator did not boot within the test window"
+            exit 1
+          fi
+          adb -s "$serial" install tool/lx_prototype/android/app/build/outputs/apk/debug/app-debug.apk
+          adb -s "$serial" install tool/lx_prototype/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          timeout 120 adb -s "$serial" shell am instrument -w com.alizesa.motif.lxprobe.test/com.alizesa.motif.lxprobe.IsolationInstrumentation | tee "$RUNNER_TEMP/motif-lx/instrumentation.log"
           grep -Eq '^(INSTRUMENTATION_RESULT: stream=)?PASS Motif LX Android isolation and controlled media$' <(tr -d '\r' <"$RUNNER_TEMP/motif-lx/instrumentation.log")
           grep -Fqx 'INSTRUMENTATION_CODE: -1' <(tr -d '\r' <"$RUNNER_TEMP/motif-lx/instrumentation.log")
       - name: Upload prototype APKs and test output

@@ -1,5 +1,5 @@
-#include <winsock2.h>
-#include <windows.h>
+#include "sandbox.h"
+
 #include <sddl.h>
 #include <shlobj.h>
 #include <userenv.h>
@@ -7,16 +7,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cwchar>
 #include <memory>
-#include <stdexcept>
 #include <string>
-#include <vector>
-
-#include "runtime_fixture.h"
 
 namespace {
+using namespace motif::lx_probe;
 
 constexpr DWORD kJobFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
                             JOB_OBJECT_LIMIT_PROCESS_MEMORY |
@@ -24,38 +19,6 @@ constexpr DWORD kJobFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
 constexpr SIZE_T kProcessMemory = 64 * 1024 * 1024;
 constexpr DWORD kStartupTimeout = 5000;
 constexpr DWORD kFixtureTimeout = 5000;
-int worker_error = 82;
-
-struct Handle {
-  HANDLE value;
-  explicit Handle(HANDLE handle = nullptr) : value(handle) {}
-  Handle(const Handle&) = delete;
-  Handle& operator=(const Handle&) = delete;
-  ~Handle() {
-    if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value);
-  }
-};
-
-[[noreturn]] void Fail(const char* step) {
-  const DWORD error = GetLastError();
-  std::fprintf(stderr, "%s (Windows status %lu)\n", step,
-               static_cast<unsigned long>(error));
-  throw std::runtime_error(step);
-}
-
-void Require(bool condition, const char* step) {
-  if (!condition) Fail(step);
-}
-
-std::vector<std::byte> TokenInfo(HANDLE token, TOKEN_INFORMATION_CLASS type) {
-  DWORD size = 0;
-  GetTokenInformation(token, type, nullptr, 0, &size);
-  Require(size > 0 && size <= 65536, "token information size");
-  std::vector<std::byte> bytes(size);
-  Require(GetTokenInformation(token, type, bytes.data(), size, &size),
-          "read actual token");
-  return bytes;
-}
 
 std::wstring SidString(PSID sid) {
   wchar_t* text = nullptr;
@@ -141,7 +104,11 @@ struct ProbeFiles {
         GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
     Require(module_length > 0 && module_length < module.size(),
             "resolve built-in fixture executable");
-    const Handle input(CreateFileW(module.data(), GENERIC_READ, FILE_SHARE_READ,
+    const std::wstring controller(module.data(), module_length);
+    const auto separator = controller.find_last_of(L"\\/");
+    Require(separator != std::wstring::npos, "resolve fixture executable directory");
+    const auto worker_source = controller.substr(0, separator + 1) + L"motif_lx_worker.exe";
+    const Handle input(CreateFileW(worker_source.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                    nullptr, OPEN_EXISTING, 0, nullptr));
     Require(input.value != INVALID_HANDLE_VALUE, "open fixture executable");
     const Handle output(CreateFileW(worker.c_str(), GENERIC_WRITE, 0,
@@ -169,42 +136,15 @@ struct ProbeFiles {
   }
 };
 
-struct PrivateDesktop {
-  HWINSTA station = nullptr;
-  HDESK desktop = nullptr;
-  ~PrivateDesktop() {
-    if (desktop) CloseDesktop(desktop);
-    if (station) CloseWindowStation(station);
-  }
-
-  void Open(const std::wstring& unique, const std::wstring& user_sid,
-            const std::wstring& app_sid) {
-    const auto owner = L"D:P(A;;GA;;;SY)(A;;GA;;;" + user_sid + L")";
-    Security station_acl(owner + L"(A;;0x0002;;;" + app_sid + L")");
-    Security desktop_acl(owner + L"(A;;0x0001;;;" + app_sid + L")");
-    const auto original = GetProcessWindowStation();
-    station = CreateWindowStationW(unique.c_str(), 0, WINSTA_ALL_ACCESS,
-                                  &station_acl.attributes);
-    Require(original && station, "create noninteractive window station");
-    Require(SetProcessWindowStation(station), "prepare private desktop");
-    desktop = CreateDesktopW(L"Probe", nullptr, nullptr, 0,
-                             DESKTOP_CREATEWINDOW | DESKTOP_READOBJECTS |
-                                 DESKTOP_WRITEOBJECTS,
-                             &desktop_acl.attributes);
-    Require(SetProcessWindowStation(original), "restore controller window station");
-    Require(desktop, "create private desktop");
-  }
-};
-
 class Attributes {
  public:
   Attributes() {
     SIZE_T size = 0;
-    InitializeProcThreadAttributeList(nullptr, 3, 0, &size);
+    InitializeProcThreadAttributeList(nullptr, 4, 0, &size);
     Require(size > 0, "measure launch attributes");
     bytes_.resize(size);
     list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(bytes_.data());
-    Require(InitializeProcThreadAttributeList(list, 3, 0, &size),
+    Require(InitializeProcThreadAttributeList(list, 4, 0, &size),
             "prepare launch attributes");
   }
   ~Attributes() { DeleteProcThreadAttributeList(list); }
@@ -218,185 +158,17 @@ class Attributes {
   std::vector<std::byte> bytes_;
 };
 
-bool SamePrivilege(LUID a, LUID b) {
-  return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
-}
-
-LUID TraversePrivilege() {
-  LUID traverse{};
-  Require(LookupPrivilegeValueW(nullptr, SE_CHANGE_NOTIFY_NAME, &traverse),
-          "look up directory traverse privilege");
-  return traverse;
-}
-
-std::vector<LUID_AND_ATTRIBUTES> PrivilegesToRemove(HANDLE token) {
-  const auto raw = TokenInfo(token, TokenPrivileges);
-  const auto* privileges = reinterpret_cast<const TOKEN_PRIVILEGES*>(raw.data());
-  const auto traverse = TraversePrivilege();
-  std::vector<LUID_AND_ATTRIBUTES> result;
-  for (DWORD i = 0; i < privileges->PrivilegeCount; ++i) {
-    const auto entry = privileges->Privileges[i];
-    if (!SamePrivilege(entry.Luid, traverse)) result.push_back(entry);
-  }
-  return result;
-}
-
-void VerifyToken(HANDLE process, PSID expected_sid) {
-  HANDLE raw = nullptr;
-  Require(OpenProcessToken(process, TOKEN_QUERY, &raw), "open fixture token");
-  const Handle token(raw);
-  const auto container = TokenInfo(token.value, TokenIsAppContainer);
-  const auto sid = TokenInfo(token.value, TokenAppContainerSid);
-  const auto caps = TokenInfo(token.value, TokenCapabilities);
-  const auto container_sid =
-      reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(sid.data())->TokenAppContainer;
-  Require(*reinterpret_cast<const DWORD*>(container.data()) == 1 &&
-              container_sid && EqualSid(container_sid, expected_sid) &&
-              reinterpret_cast<const TOKEN_GROUPS*>(caps.data())->GroupCount == 0 &&
-              PrivilegesToRemove(token.value).empty(),
-          "actual fixture token must have no capabilities or system privileges");
-}
-
-void VerifyWorkerDesktop(const wchar_t* expected_station) {
-  const auto station = GetProcessWindowStation();
-  std::array<wchar_t, 120> name{};
-  DWORD bytes = 0;
-  USEROBJECTFLAGS flags{};
-  Require(station &&
-              GetUserObjectInformationW(station, UOI_NAME, name.data(), sizeof(name), &bytes) &&
-              std::wstring(name.data()) == expected_station &&
-              GetUserObjectInformationW(station, UOI_FLAGS, &flags, sizeof(flags), &bytes) &&
-              (flags.dwFlags & WSF_VISIBLE) == 0,
-          "worker must be outside the interactive window station");
-  name.fill(0);
-  Require(GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME,
-                                  name.data(), sizeof(name), &bytes) &&
-              std::wstring(name.data()) == L"Probe",
-          "worker must use its private desktop");
-}
-
-struct Winsock {
-  Winsock() {
-    WSADATA info{};
-    Require(WSAStartup(MAKEWORD(2, 2), &info) == 0, "initialize fixture sockets");
-  }
-  ~Winsock() { WSACleanup(); }
-};
-
-struct Loopback {
-  SOCKET socket = INVALID_SOCKET;
-  sockaddr_in endpoint{};
-  ~Loopback() {
-    if (socket != INVALID_SOCKET) closesocket(socket);
-  }
-  void Bind() {
-    socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    Require(socket != INVALID_SOCKET, "open loopback fixture");
-    endpoint.sin_family = AF_INET;
-    endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    int size = sizeof(endpoint);
-    Require(bind(socket, reinterpret_cast<const sockaddr*>(&endpoint), size) == 0 &&
-                listen(socket, 1) == 0 &&
-                getsockname(socket, reinterpret_cast<sockaddr*>(&endpoint), &size) == 0,
-            "listen only on a random loopback port");
-  }
-};
-
-struct ProgressCell {
-  volatile LONG* value;
-  explicit ProgressCell(HANDLE section) : value(static_cast<volatile LONG*>(
-      MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, sizeof(LONG)))) {
-    Require(value, "map fixture progress");
-  }
-  ~ProgressCell() { UnmapViewOfFile(const_cast<LONG*>(value)); }
-  ProgressCell(const ProgressCell&) = delete;
-  ProgressCell& operator=(const ProgressCell&) = delete;
-  void Mark(LONG stage) const { InterlockedExchange(value, stage); }
-  LONG Read() const { return InterlockedCompareExchange(value, 0, 0); }
-};
-
-void VerifyLoopbackDenial(u_short port) {
-  const Winsock winsock;
-  Loopback client;
-  client.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (client.socket == INVALID_SOCKET) {
-    Require(WSAGetLastError() == WSAEACCES, "socket unavailable for an unknown reason");
-    return;
-  }
-  u_long nonblocking = 1;
-  Require(ioctlsocket(client.socket, FIONBIO, &nonblocking) == 0, "bound loopback connect");
-  client.endpoint.sin_family = AF_INET;
-  client.endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  client.endpoint.sin_port = htons(port);
-  Require(connect(client.socket, reinterpret_cast<const sockaddr*>(&client.endpoint),
-                  sizeof(client.endpoint)) == SOCKET_ERROR,
-          "isolated worker reached the control listener");
-  int error = WSAGetLastError();
-  if (error == WSAEWOULDBLOCK) {
-    fd_set writable{};
-    fd_set errors{};
-    FD_SET(client.socket, &writable);
-    FD_SET(client.socket, &errors);
-    timeval budget{1, 0};
-    const int result = select(0, nullptr, &writable, &errors, &budget);
-    if (result == 0) SetLastError(ERROR_TIMEOUT);
-    Require(result > 0, "loopback denial did not complete");
-    int size = sizeof(error);
-    Require(getsockopt(client.socket, SOL_SOCKET, SO_ERROR,
-                       reinterpret_cast<char*>(&error), &size) == 0,
-            "read loopback connection result");
-  }
-  SetLastError(static_cast<DWORD>(error));
-  Require(error == WSAEACCES, "worker could not prove a denial connecting to loopback");
-}
-
-int Worker(wchar_t** argv) {
-  const auto section = reinterpret_cast<HANDLE>(
-      static_cast<std::uintptr_t>(std::wcstoull(argv[8], nullptr, 10)));
-  const ProgressCell progress(section);
-  progress.Mark(1);
-  worker_error = 83;
-  PSID expected = nullptr;
-  Require(ConvertStringSidToSidW(argv[3], &expected), "decode app container identity");
-  try {
-    VerifyToken(GetCurrentProcess(), expected);
-  } catch (...) {
-    LocalFree(expected);
-    throw;
-  }
-  LocalFree(expected);
-  progress.Mark(2);
-  worker_error = 84;
-  VerifyWorkerDesktop(argv[2]);
-  BOOL in_job = FALSE;
-  PROCESS_MITIGATION_CHILD_PROCESS_POLICY child_policy{};
-  Require(IsProcessInJob(GetCurrentProcess(), nullptr, &in_job) && in_job &&
-              GetProcessMitigationPolicy(GetCurrentProcess(), ProcessChildProcessPolicy,
-                                         &child_policy, sizeof(child_policy)) &&
-              child_policy.NoChildProcessCreation,
-          "worker must have child process creation disabled");
-  progress.Mark(3);
-
-  worker_error = 85;
-  const Handle canary(CreateFileW(argv[4], GENERIC_READ, FILE_SHARE_READ,
-                                nullptr, OPEN_EXISTING, 0, nullptr));
-  Require(canary.value == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
-          "worker could not prove a denial reading the host-only canary");
-  progress.Mark(4);
-  worker_error = 86;
-  const auto port = std::wcstoul(argv[5], nullptr, 10);
-  Require(port > 0 && port <= 65535, "invalid fixture port");
-  VerifyLoopbackDenial(htons(static_cast<u_short>(port)));
-  progress.Mark(5);
-
-  const auto signal = reinterpret_cast<HANDLE>(
-      static_cast<std::uintptr_t>(std::wcstoull(argv[6], nullptr, 10)));
-  Require(SetEvent(signal), "report sandbox readiness");
-  if (std::wstring(argv[7]) == L"stall") {
-    Sleep(INFINITE);
-    return 80;
-  }
-  return static_cast<int>(motif::lx_probe::RunRuntimeFixtures());
+u_short BindLoopback(Loopback& listener) {
+  listener.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  Require(listener.socket != INVALID_SOCKET, "open loopback fixture");
+  listener.endpoint.sin_family = AF_INET;
+  listener.endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int size = sizeof(listener.endpoint);
+  Require(bind(listener.socket, reinterpret_cast<const sockaddr*>(&listener.endpoint), size) == 0 &&
+              listen(listener.socket, 1) == 0 &&
+              getsockname(listener.socket, reinterpret_cast<sockaddr*>(&listener.endpoint), &size) == 0,
+          "listen only on a random loopback port");
+  return ntohs(listener.endpoint.sin_port);
 }
 
 std::wstring WorkerEnvironment() {
@@ -450,15 +222,16 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   HANDLE allowed_handles[]{ready.value, section.value};
   SECURITY_CAPABILITIES capabilities{profile.sid, nullptr, 0, 0};
   DWORD prohibit_children = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+  DWORD64 mitigation = PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
   Attributes attributes;
   attributes.Set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities,
                  sizeof(capabilities));
   attributes.Set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &prohibit_children,
                  sizeof(prohibit_children));
+  attributes.Set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation, sizeof(mitigation));
   attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allowed_handles, sizeof(allowed_handles));
 
-  std::wstring desktop = profile.name + L"\\Probe";
-  std::wstring args = L"motif-lx-fixture --worker " + profile.name + L" " +
+  std::wstring args = L"motif-lx-fixture " +
       SidString(profile.sid) + L" \"" + files.canary + L"\" " +
       std::to_wstring(port) + L" " +
       std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) +
@@ -467,11 +240,10 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   auto environment = WorkerEnvironment();
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
-  startup.StartupInfo.lpDesktop = desktop.data();
   startup.lpAttributeList = attributes.list;
   PROCESS_INFORMATION child{};
   Require(CreateProcessAsUserW(token, files.worker.c_str(), args.data(),
-      nullptr, nullptr, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW |
+      nullptr, nullptr, TRUE, CREATE_SUSPENDED |
           EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
       environment.data(), files.folder.c_str(), &startup.StartupInfo, &child),
       "create suspended restricted fixture");
@@ -483,6 +255,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     Require(IsProcessInJob(process.value, job.value, &in_job) && in_job,
             "verify fixture job membership");
     VerifyToken(process.value, profile.sid);
+    VerifyMitigations(process.value);
     Require(ResumeThread(thread.value) == 1, "start verified fixture");
     const HANDLE events[]{ready.value, process.value};
     const DWORD ready_result = WaitForMultipleObjects(2, events, FALSE, kStartupTimeout);
@@ -539,27 +312,23 @@ int Run() {
   const Profile profile(unique);
   ProbeFiles files;
   files.Prepare(unique, user_sid, SidString(profile.sid));
-  PrivateDesktop desktop;
-  desktop.Open(unique, user_sid, SidString(profile.sid));
   const Winsock winsock;
   Loopback server;
-  server.Bind();
-  const auto port = ntohs(server.endpoint.sin_port);
+  const auto port = BindLoopback(server);
   Launch(restricted.value, files, profile, port, false);
   Launch(restricted.value, files, profile, port, true);
   Launch(restricted.value, files, profile, port, false);
-  std::puts("PASS Windows token, desktop, child process, canary, TCP, QuickJS, timeout and restart");
+  std::puts("PASS Windows token, Win32k lockdown, child process, canary, TCP, QuickJS, timeout and restart");
   return 0;
 }
 
 }  // namespace
 
-int wmain(int argc, wchar_t** argv) {
+int wmain(int argc, wchar_t**) {
   try {
-    if (argc == 9 && std::wstring(argv[1]) == L"--worker") return Worker(argv);
     if (argc == 1) return Run();
     return 81;
   } catch (const std::exception&) {
-    return worker_error;
+    return 82;
   }
 }
