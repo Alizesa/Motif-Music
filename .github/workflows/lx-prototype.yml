@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $probe = Join-Path $env:RUNNER_TEMP 'motif-lx'
-          $library = Join-Path $probe 'fixture/libmpv.dll'
+          $library = Join-Path $probe 'media fixture/libmpv.dll'
           $build = Join-Path $probe 'build'
           cmake "-DMOTIF_MPV_PLATFORM=windows-x64" "-DMOTIF_MPV_OUTPUT=$library" -P tool/lx_prototype/fetch_mpv.cmake
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -42,6 +42,23 @@ jobs:
           cmake --build $build --config Release --parallel 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir $build -C Release --output-on-failure --no-tests=error
+
+      - name: Stage and verify the portable Windows probes
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'motif-lx'
+          $build = Join-Path $probe 'build/Release'
+          $library = Join-Path $probe 'media fixture/libmpv.dll'
+          $package = Join-Path $probe 'windows probe package'
+          cmake "-DMOTIF_LX_WINDOWS_BUILD=$build" "-DMOTIF_LX_WINDOWS_PACKAGE=$package" "-DMOTIF_LX_MPV_DLL=$library" "-DMOTIF_LX_SOURCE_COMMIT=$env:GITHUB_SHA" -P tool/lx_prototype/package_windows.cmake
+
+      - name: Upload the portable Windows probes and test output
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: motif-lx-windows-prototype
+          path: ${{ runner.temp }}/motif-lx/windows probe package/
+          if-no-files-found: error
 
   android:
     runs-on: ubuntu-latest
