@@ -49,9 +49,7 @@ public final class IsolationInstrumentation extends Instrumentation {
             try (FileOutputStream stream = new FileOutputStream(canary)) {
                 stream.write('M');
             }
-            try (FileInputStream stream = new FileInputStream(canary)) {
-                require(stream.read() == 'M', "host cannot read its own fixture");
-            }
+            verifyHostCanary(canary);
             final InetAddress loopback = InetAddress.getByAddress(new byte[]{127, 0, 0, 1});
             try (ServerSocket listener = new ServerSocket(0, 1, loopback)) {
                 final int port = listener.getLocalPort();
@@ -59,8 +57,15 @@ public final class IsolationInstrumentation extends Instrumentation {
                 runWorker(context, canary, port, true);
                 runWorker(context, canary, port, false);
             }
+            verifyHostCanary(canary);
         } finally {
             require(canary.delete(), "could not remove host-only fixture");
+        }
+    }
+
+    private static void verifyHostCanary(File canary) throws Exception {
+        try (FileInputStream stream = new FileInputStream(canary)) {
+            require(stream.read() == 'M', "host cannot read its own fixture");
         }
     }
 

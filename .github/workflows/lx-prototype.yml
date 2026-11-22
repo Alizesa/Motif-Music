@@ -89,7 +89,10 @@ jobs:
           emulator_pid=$!
           cleanup() {
             local result=$?
-            if (( result != 0 )); then tail -n 100 "$log" || true; fi
+            if (( result != 0 )); then
+              tail -n 50 "$log" || true
+              timeout 10 adb -s "$serial" logcat -d -s MotifLxProbe:V || true
+            fi
             timeout 10 adb -s "$serial" emu kill >/dev/null 2>&1 || true
             kill "$emulator_pid" 2>/dev/null || true
             return "$result"
@@ -113,7 +116,7 @@ jobs:
           fi
           adb -s "$serial" install tool/lx_prototype/android/app/build/outputs/apk/debug/app-debug.apk
           adb -s "$serial" install tool/lx_prototype/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          timeout 120 adb -s "$serial" shell am instrument -w com.alizesa.motif.lxprobe.test/com.alizesa.motif.lxprobe.IsolationInstrumentation | tee "$RUNNER_TEMP/motif-lx/instrumentation.log"
+          timeout 120 adb -s "$serial" shell am instrument -w -r com.alizesa.motif.lxprobe.test/com.alizesa.motif.lxprobe.IsolationInstrumentation | tee "$RUNNER_TEMP/motif-lx/instrumentation.log"
           grep -Eq '^(INSTRUMENTATION_RESULT: stream=)?PASS Motif LX Android isolation and controlled media$' <(tr -d '\r' <"$RUNNER_TEMP/motif-lx/instrumentation.log")
           grep -Fqx 'INSTRUMENTATION_CODE: -1' <(tr -d '\r' <"$RUNNER_TEMP/motif-lx/instrumentation.log")
       - name: Upload prototype APKs and test output

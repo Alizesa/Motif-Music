@@ -11,6 +11,7 @@ import android.os.RemoteException;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
+import android.util.Log;
 import java.io.FileDescriptor;
 import java.net.InetAddress;
 import java.net.SocketException;
@@ -25,8 +26,10 @@ public final class ProbeService extends Service {
     static final int RUN_FIXTURES = 1;
     static final int STALL_FIXTURE = 2;
     static final int STALL_STARTED = 8;
-    private static final int ISOLATION_REJECTED = 10;
+    private static final int INTERNET_PERMISSION_GRANTED = 10;
     private static final int RUNNER_FAILURE = 11;
+    private static final int CANARY_ACCESS_UNVERIFIED = 12;
+    private static final int LOOPBACK_ACCESS_UNVERIFIED = 13;
     private static final int NO_OWNER = -1;
 
     private final AtomicInteger owner = new AtomicInteger(NO_OWNER);
@@ -67,14 +70,13 @@ public final class ProbeService extends Service {
     private void runFixture(int fixture, String canary, int port, IProbeResult result) {
         int code;
         try {
-            if (checkSelfPermission(Manifest.permission.INTERNET) != PackageManager.PERMISSION_DENIED
-                    || !canaryDenied(canary) || !loopbackDenied(port)) {
-                code = ISOLATION_REJECTED;
-            } else if (fixture == STALL_FIXTURE) {
-                result.report(STALL_STARTED, Process.myUid());
-                new CountDownLatch(1).await();
-                return;
-            } else {
+            code = checkIsolation(canary, port);
+            if (code == 0) {
+                if (fixture == STALL_FIXTURE) {
+                    result.report(STALL_STARTED, Process.myUid());
+                    new CountDownLatch(1).await();
+                    return;
+                }
                 System.loadLibrary("motif_lx_probe");
                 code = nativeRunFixture();
             }
@@ -91,41 +93,68 @@ public final class ProbeService extends Service {
         }
     }
 
-    private static boolean isAccessDenied(ErrnoException error) {
-        return error.errno == OsConstants.EACCES || error.errno == OsConstants.EPERM;
-    }
-
-    private static boolean canaryDenied(String canary) {
-        try {
-            FileDescriptor fd = Os.open(canary, OsConstants.O_RDONLY, 0);
-            Os.close(fd);
-            return false;
-        } catch (ErrnoException error) {
-            return isAccessDenied(error);
+    private int checkIsolation(String canary, int port) {
+        if (checkSelfPermission(Manifest.permission.INTERNET) != PackageManager.PERMISSION_DENIED) {
+            Log.w("MotifLxProbe", "Unexpected INTERNET permission in isolated UID");
+            return INTERNET_PERMISSION_GRANTED;
         }
+        final int fileStatus = canaryOpenStatus(canary);
+        // ART can hide the app's private directory entirely. The host checks
+        // that the exact same generated canary is readable, including after exit.
+        if (!isAccessDenied(fileStatus) && fileStatus != OsConstants.ENOENT) {
+            Log.w("MotifLxProbe", "Unexpected private canary open result " + fileStatus);
+            return CANARY_ACCESS_UNVERIFIED;
+        }
+        final int networkStatus = loopbackConnectStatus(port);
+        if (!isAccessDenied(networkStatus)) {
+            Log.w("MotifLxProbe", "Unexpected isolated TCP result " + networkStatus);
+            return LOOPBACK_ACCESS_UNVERIFIED;
+        }
+        Log.i("MotifLxProbe", "Private canary and TCP blocked (" + fileStatus
+                + ", " + networkStatus + ")");
+        return 0;
     }
 
-    private static boolean loopbackDenied(int port) {
+    private static boolean isAccessDenied(int status) {
+        return status == OsConstants.EACCES || status == OsConstants.EPERM;
+    }
+
+    private static int canaryOpenStatus(String canary) {
+        final FileDescriptor fd;
+        try {
+            fd = Os.open(canary, OsConstants.O_RDONLY, 0);
+        } catch (ErrnoException error) {
+            return error.errno;
+        }
+        closeQuietly(fd);
+        return 0;
+    }
+
+    private static int loopbackConnectStatus(int port) {
         FileDescriptor fd = null;
         try {
             fd = Os.socket(OsConstants.AF_INET, OsConstants.SOCK_STREAM, 0);
             Os.connect(fd, InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), port);
-            return false;
+            return 0;
         } catch (ErrnoException error) {
-            return isAccessDenied(error);
+            return error.errno;
         } catch (SocketException error) {
-            return error.getCause() instanceof ErrnoException
-                    && isAccessDenied((ErrnoException) error.getCause());
-        } catch (UnknownHostException impossible) {
-            throw new AssertionError(impossible);
-        } finally {
-            if (fd != null) {
-                try {
-                    Os.close(fd);
-                } catch (ErrnoException ignored) {
-                    // The watchdog still owns process cleanup.
-                }
+            if (error.getCause() instanceof ErrnoException) {
+                return ((ErrnoException) error.getCause()).errno;
             }
+            return -1;
+        } catch (UnknownHostException impossible) {
+            return -1;
+        } finally {
+            if (fd != null) closeQuietly(fd);
+        }
+    }
+
+    private static void closeQuietly(FileDescriptor fd) {
+        try {
+            Os.close(fd);
+        } catch (ErrnoException ignored) {
+            // The watchdog still owns process cleanup.
         }
     }
 
