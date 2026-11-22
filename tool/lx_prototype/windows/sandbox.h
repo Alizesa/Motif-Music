@@ -105,7 +105,7 @@ struct Loopback {
 };
 
 struct ProgressCell {
-  static constexpr SIZE_T kBytes = 2 * sizeof(LONG);
+  static constexpr SIZE_T kBytes = 4 * sizeof(LONG);
   volatile LONG* value;
   explicit ProgressCell(HANDLE section) : value(static_cast<volatile LONG*>(
       MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, kBytes))) {
@@ -120,6 +120,10 @@ struct ProgressCell {
     InterlockedExchange(value + 1, status);
   }
   LONG NetworkError() const { return InterlockedCompareExchange(value + 1, 0, 0); }
+  void RequestCatalog(LONG request) const { InterlockedExchange(value + 2, request); }
+  LONG CatalogRequest() const { return InterlockedCompareExchange(value + 2, 0, 0); }
+  void ReplyCatalog(LONG reply) const { InterlockedExchange(value + 3, reply); }
+  LONG CatalogReply() const { return InterlockedCompareExchange(value + 3, 0, 0); }
 };
 
 }  // namespace motif::lx_probe

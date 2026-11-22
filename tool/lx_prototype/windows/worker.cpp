@@ -67,8 +67,20 @@ HANDLE ParseHandle(const wchar_t* text) {
   return reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(number));
 }
 
+int ReadCatalog(void* opaque, int command) {
+  const auto& progress = *static_cast<ProgressCell*>(opaque);
+  progress.RequestCatalog(command);
+  const auto deadline = GetTickCount64() + 1000;
+  do {
+    const LONG result = progress.CatalogReply();
+    if (result != 0) return result;
+    Sleep(2);
+  } while (GetTickCount64() < deadline);
+  return -1;
+}
+
 int Worker(wchar_t** argv) {
-  const ProgressCell progress(ParseHandle(argv[6]));
+  ProgressCell progress(ParseHandle(argv[6]));
   progress.Mark(1);
   worker_error = 83;
   PSID raw = nullptr;
@@ -97,11 +109,15 @@ int Worker(wchar_t** argv) {
   VerifyLoopbackDenial(static_cast<u_short>(port), progress);
   progress.Mark(5);
   const std::wstring_view mode(argv[5]);
-  Require(mode == L"stall" || mode == L"bounded", "invalid fixture mode");
+  Require(mode == L"stall" || mode == L"bounded" ||
+              mode == L"lx-fixed" || mode == L"lx-timeout", "invalid fixture mode");
   Require(SetEvent(ParseHandle(argv[4])), "report sandbox readiness");
   if (mode == L"stall") {
     Sleep(INFINITE);
     return 80;
+  }
+  if (mode == L"lx-fixed" || mode == L"lx-timeout") {
+    return RunPlaybackFixture(mode == L"lx-timeout", ReadCatalog, &progress);
   }
   return static_cast<int>(RunRuntimeFixtures());
 }

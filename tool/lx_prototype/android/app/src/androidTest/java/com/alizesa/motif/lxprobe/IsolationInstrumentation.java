@@ -17,6 +17,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class IsolationInstrumentation extends Instrumentation {
     @Override
@@ -53,9 +54,11 @@ public final class IsolationInstrumentation extends Instrumentation {
             final InetAddress loopback = InetAddress.getByAddress(new byte[]{127, 0, 0, 1});
             try (ServerSocket listener = new ServerSocket(0, 1, loopback)) {
                 final int port = listener.getLocalPort();
-                runWorker(context, canary, port, false);
-                runWorker(context, canary, port, true);
-                runWorker(context, canary, port, false);
+                runWorker(context, canary, port, ProbeService.RUN_FIXTURES, 0);
+                runWorker(context, canary, port, ProbeService.STALL_FIXTURE, ProbeService.STALL_STARTED);
+                runWorker(context, canary, port, ProbeService.RUN_FIXTURES, 0);
+                runWorker(context, canary, port, ProbeService.PLAYBACK_FIXTURE, 0);
+                runWorker(context, canary, port, ProbeService.PLAYBACK_TIMEOUT, ProbeService.PLAYBACK_TIMED_OUT);
             }
             verifyHostCanary(canary);
         } finally {
@@ -69,7 +72,7 @@ public final class IsolationInstrumentation extends Instrumentation {
         }
     }
 
-    private static void runWorker(Context context, File canary, int port, boolean stall)
+    private static void runWorker(Context context, File canary, int port, int fixture, int expected)
             throws Exception {
         final CompletableFuture<IBinder> ready = new CompletableFuture<>();
         final ServiceConnection connection = new ServiceConnection() {
@@ -98,23 +101,34 @@ public final class IsolationInstrumentation extends Instrumentation {
             try {
                 final IProbe worker = IProbe.Stub.asInterface(binder);
                 final CompletableFuture<Integer> outcome = new CompletableFuture<>();
-                worker.start(stall ? ProbeService.STALL_FIXTURE : ProbeService.RUN_FIXTURES,
+                final AtomicInteger catalogUid = new AtomicInteger();
+                worker.start(fixture,
                         canary.getAbsolutePath(), port, new IProbeResult.Stub() {
                             @Override
                             public void report(int code, int isolatedUid) {
                                 if (isolatedUid > 0 && isolatedUid != Process.myUid()
-                                        && isolatedUid == Binder.getCallingUid()) {
+                                        && isolatedUid == Binder.getCallingUid()
+                                        && (fixture != ProbeService.PLAYBACK_FIXTURE
+                                        || catalogUid.get() == isolatedUid)) {
                                     outcome.complete(code);
                                 } else {
                                     outcome.completeExceptionally(
                                             new IllegalStateException("Worker ran under app UID"));
                                 }
                             }
+                        }, new IFixtureCatalog.Stub() {
+                            @Override
+                            public int query(int request) {
+                                final int uid = Binder.getCallingUid();
+                                return fixture == ProbeService.PLAYBACK_FIXTURE && request == 1
+                                        && uid != Process.myUid() && uid > 0
+                                        && catalogUid.compareAndSet(0, uid) ? 1 : -1;
+                            }
                         });
                 final int code = outcome.get(8, TimeUnit.SECONDS);
-                require(code == (stall ? ProbeService.STALL_STARTED : 0),
+                require(code == expected,
                         "sandbox or fixed QuickJS test returned " + code);
-                if (!stall) worker.stop();
+                if (fixture != ProbeService.STALL_FIXTURE) worker.stop();
                 // Unbind and onServiceDisconnected are not evidence of exit.
                 exited.get(8, TimeUnit.SECONDS);
             } finally {

@@ -13,4 +13,9 @@ enum class RuntimeResult : int {
 
 RuntimeResult RunRuntimeFixtures();
 
+// One bounded outbound IPC operation. No script text or arbitrary target is
+// supplied to this native fixture.
+using FixtureCatalog = int (*)(void*, int);
+int RunPlaybackFixture(bool timeout, FixtureCatalog catalog, void* opaque);
+
 }  // namespace motif::lx_probe

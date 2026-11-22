@@ -13,6 +13,8 @@ val testSigningAvailable = listOf(
     testKeystorePath, testStorePassword, testKeyAlias, testKeyPassword,
 ).all { !it.isNullOrBlank() }
 val requireTestSigning = System.getenv("MOTIF_REQUIRE_TEST_SIGNING") == "true"
+val lxFixtureEnabled = System.getenv("MOTIF_LX_APP_FIXTURE") == "true"
+val lxPrototype = rootProject.file("../tool/lx_prototype")
 check(!requireTestSigning || testSigningAvailable) {
     "Stable test signing is required; configure the MOTIF_TEST_* Actions secrets."
 }
@@ -21,6 +23,22 @@ android {
     namespace = "com.alizesa.motif"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+    }
+    sourceSets.getByName("main") {
+        java.srcDir(lxPrototype.resolve("android/app/src/main/java"))
+        aidl.srcDir(lxPrototype.resolve("android/app/src/main/aidl"))
+    }
+    if (lxFixtureEnabled) {
+        externalNativeBuild {
+            cmake {
+                path = lxPrototype.resolve("CMakeLists.txt")
+                version = "3.22.1"
+            }
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -40,6 +58,16 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        buildConfigField("boolean", "MOTIF_LX_FIXTURE", lxFixtureEnabled.toString())
+        manifestPlaceholders["motifLxFixtureEnabled"] = lxFixtureEnabled.toString()
+        if (lxFixtureEnabled) {
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DMOTIF_LX_RUNTIME_ONLY=ON"
+                    targets += "motif_lx_probe"
+                }
+            }
+        }
     }
 
     signingConfigs {
@@ -59,6 +87,7 @@ android {
             signingConfig = signingConfigs.getByName(
                 if (testSigningAvailable) "internalTest" else "debug",
             )
+            if (lxFixtureEnabled) proguardFiles("lx-fixture.pro")
         }
     }
 }

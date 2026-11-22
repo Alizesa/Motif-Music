@@ -25,7 +25,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class ProbeService extends Service {
     static final int RUN_FIXTURES = 1;
     static final int STALL_FIXTURE = 2;
+    public static final int PLAYBACK_FIXTURE = 3;
+    public static final int PLAYBACK_TIMEOUT = 4;
     static final int STALL_STARTED = 8;
+    public static final int PLAYBACK_TIMED_OUT = 90;
     private static final int INTERNET_PERMISSION_GRANTED = 10;
     private static final int RUNNER_FAILURE = 11;
     private static final int CANARY_ACCESS_UNVERIFIED = 12;
@@ -36,16 +39,19 @@ public final class ProbeService extends Service {
     private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
     private final IProbe.Stub endpoint = new IProbe.Stub() {
         @Override
-        public void start(int fixture, String canary, int port, IProbeResult result) {
+        public void start(int fixture, String canary, int port, IProbeResult result,
+                          IFixtureCatalog catalog) {
             final int caller = Binder.getCallingUid();
-            if ((fixture != RUN_FIXTURES && fixture != STALL_FIXTURE)
+            if (fixture < RUN_FIXTURES || fixture > PLAYBACK_TIMEOUT
+                    || (fixture >= PLAYBACK_FIXTURE && catalog == null)
                     || canary == null || canary.isEmpty() || canary.length() > 4096
                     || port < 1 || port > 65535 || result == null
                     || caller == Process.myUid() || !owner.compareAndSet(NO_OWNER, caller)) {
                 return;
             }
             watchdog.schedule(ProbeService::stopProcess, 4, TimeUnit.SECONDS);
-            new Thread(() -> runFixture(fixture, canary, port, result), "motif-lx-fixture").start();
+            new Thread(() -> runFixture(fixture, canary, port, result, catalog),
+                    "motif-lx-fixture").start();
         }
 
         @Override
@@ -67,7 +73,8 @@ public final class ProbeService extends Service {
         super.onDestroy();
     }
 
-    private void runFixture(int fixture, String canary, int port, IProbeResult result) {
+    private void runFixture(int fixture, String canary, int port, IProbeResult result,
+                            IFixtureCatalog catalog) {
         int code;
         try {
             code = checkIsolation(canary, port);
@@ -78,7 +85,9 @@ public final class ProbeService extends Service {
                     return;
                 }
                 System.loadLibrary("motif_lx_probe");
-                code = nativeRunFixture();
+                code = fixture >= PLAYBACK_FIXTURE
+                        ? nativePlayback(fixture == PLAYBACK_TIMEOUT, catalog)
+                        : nativeRunFixture();
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
@@ -163,4 +172,5 @@ public final class ProbeService extends Service {
     }
 
     private static native int nativeRunFixture();
+    private static native int nativePlayback(boolean timeout, IFixtureCatalog catalog);
 }

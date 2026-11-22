@@ -6,6 +6,11 @@
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher">
+        <service
+            android:name="com.alizesa.motif.lxprobe.ProbeService"
+            android:enabled="${motifLxFixtureEnabled}"
+            android:exported="false"
+            android:isolatedProcess="true" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

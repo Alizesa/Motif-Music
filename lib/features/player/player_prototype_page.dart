@@ -5,8 +5,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../audio/audio_engine.dart';
+import '../../audio/controlled_pcm.dart';
 import '../../audio/mpv_audio_engine.dart';
 import '../../library/application/library_controller.dart';
+import '../../online/lx/fixture/lx_fixture_runtime.dart';
+import '../../online/lx/fixture/lx_fixture_transport.dart';
+import '../../online/lx/fixture/lx_fixture_wave.dart';
 import '../library/library_page.dart';
 import '../settings/playback_settings_page.dart';
 
@@ -33,6 +37,9 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
   final TextEditingController _streamUrlController = TextEditingController();
   StreamSubscription<String>? _errorSubscription;
   Timer? _equalizerTimer;
+  final _fixtureRuntime = const LxFixtureRuntime();
+  PcmCancellation? _fixture;
+  bool _fixtureStarting = false;
 
   List<double> _equalizerGains = List<double>.filled(10, 0);
   String? _errorMessage;
@@ -52,6 +59,12 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
 
   @override
   void dispose() {
+    if (_fixture != null) {
+      _fixture?.cancel();
+      if (_engine case MpvAudioEngine engine) {
+        unawaited(engine.closeControlledPcm().catchError((Object _) {}));
+      }
+    }
     _streamUrlController.dispose();
     _equalizerTimer?.cancel();
     unawaited(_errorSubscription?.cancel());
@@ -67,6 +80,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
           onPlay: (file) async {
             if (!mounted) throw StateError('播放器已关闭');
             setState(() => _errorMessage = null);
+            _forgetLxFixture();
             widget.onQueueWillOpen?.call();
             await _engine.openQueue([
               AudioTrack(uri: file.location.locator, title: file.displayTitle),
@@ -99,6 +113,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
       final tracks = files
           .map((file) => AudioTrack(uri: file.uri.toString(), title: file.name))
           .toList(growable: false);
+      _forgetLxFixture();
       widget.onQueueWillOpen?.call();
       await _engine.openQueue(tracks);
     } catch (error) {
@@ -109,6 +124,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
   }
 
   Future<void> _playNetworkStream() async {
+    if (_busy) return;
     final uri = Uri.tryParse(_streamUrlController.text.trim());
     if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
       setState(() => _errorMessage = '请输入有效的 HTTP 或 HTTPS 音频直链。');
@@ -121,6 +137,7 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
     });
     try {
       final title = uri.pathSegments.isEmpty ? uri.host : uri.pathSegments.last;
+      _forgetLxFixture();
       widget.onQueueWillOpen?.call();
       await _engine.openQueue([AudioTrack(uri: uri.toString(), title: title)]);
     } catch (error) {
@@ -128,6 +145,62 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _playLxFixture() async {
+    final engine = _engine;
+    if (_fixtureStarting || engine is! MpvAudioEngine) return;
+    _fixture?.cancel();
+    final request = _fixture = PcmCancellation();
+    setState(() {
+      _fixtureStarting = true;
+      _errorMessage = null;
+    });
+    FixtureWave? wave;
+    var handedOff = false;
+    try {
+      final url = await _fixtureRuntime.resolve(request);
+      wave = await FixtureWave.open(
+        url,
+        const LxFixtureHttpsTransport(),
+        request,
+      );
+      request.check();
+      if (!mounted) return;
+      widget.onQueueWillOpen?.call();
+      handedOff = true;
+      await engine.openControlledPcm(
+        wave,
+        title: lxFixtureTrackTitle,
+        cancellation: request,
+      );
+    } on PcmCancelled {
+      // The page or the next playback request cancelled this operation.
+    } on LxFixtureRuntimeException catch (error) {
+      if (mounted && !request.cancelled) {
+        final stage = error.stage == 'timeout' ? '超时检查' : '初始化或取址';
+        setState(() => _errorMessage = '隔离脚本验证失败（$stage）。');
+      }
+    } catch (_) {
+      if (mounted && !request.cancelled) {
+        setState(() => _errorMessage = '测试音频暂时无法读取，请重试。');
+      }
+    } finally {
+      if (!handedOff) wave?.close();
+      if (mounted) setState(() => _fixtureStarting = false);
+    }
+  }
+
+  Future<void> _cancelLxFixture() async {
+    setState(_forgetLxFixture);
+    if (_engine case MpvAudioEngine engine) {
+      await _runEngineAction(engine.closeControlledPcm);
+    }
+  }
+
+  void _forgetLxFixture() {
+    _fixture?.cancel();
+    _fixture = null;
   }
 
   Future<void> _runEngineAction(Future<void> Function() action) async {
@@ -241,6 +314,27 @@ class _PlayerPrototypePageState extends State<PlayerPrototypePage> {
                           ),
                         ],
                       ),
+                      if (_fixtureRuntime.isAvailable &&
+                          _engine is MpvAudioEngine)
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            FilledButton.tonal(
+                              onPressed: _busy || _fixtureStarting
+                                  ? null
+                                  : _playLxFixture,
+                              child: Text(
+                                _fixtureStarting ? '正在验证…' : '播放固定样本',
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _fixture == null
+                                  ? null
+                                  : _cancelLxFixture,
+                              child: const Text('停止样本'),
+                            ),
+                          ],
+                        ),
                       const SizedBox(height: 16),
                       TextField(
                         controller: _streamUrlController,

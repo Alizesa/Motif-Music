@@ -5,6 +5,11 @@ on:
     branches: [master, develop, 'test-*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      lx_fixture:
+        description: Include the fixed LX playback fixture in the test build
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -81,16 +86,22 @@ jobs:
 
       - name: Build release APK
         env:
+          MOTIF_LX_APP_FIXTURE: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture }}
           MOTIF_REQUIRE_TEST_SIGNING: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') }}
           MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
           MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
           MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
-        run: python3 tool/retry_gradle_downloads.py flutter build apk --release --no-pub
+        run: |
+          args=(build apk --release --no-pub)
+          if [[ "$MOTIF_LX_APP_FIXTURE" == "true" ]]; then
+            args+=(--dart-define=MOTIF_LX_APP_FIXTURE=true)
+          fi
+          python3 tool/retry_gradle_downloads.py flutter "${args[@]}"
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
         with:
-          name: motif-android-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          name: motif-android-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture && '-lx-fixture' || '' }}
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
@@ -114,15 +125,26 @@ jobs:
       - name: Test native TagLib on Windows
         run: flutter test test/library/taglib_native_test.dart --reporter expanded
 
+      - name: Test controlled PCM on the app player
+        run: flutter test test/audio/mpv_controlled_pcm_native_test.dart --dart-define=MOTIF_LX_NATIVE_TEST=true --reporter expanded
+
       - name: Prepare Windows WebView C++ compatibility
         run: python tool/patch_windows_webview.py
 
       - name: Build release
-        run: flutter build windows --release --no-pub
+        env:
+          MOTIF_LX_APP_FIXTURE: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture }}
+        shell: pwsh
+        run: |
+          $flutterArgs = @('build', 'windows', '--release', '--no-pub')
+          if ($env:MOTIF_LX_APP_FIXTURE -eq 'true') {
+            $flutterArgs += '--dart-define=MOTIF_LX_APP_FIXTURE=true'
+          }
+          flutter @flutterArgs
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: motif-windows-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          name: motif-windows-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture && '-lx-fixture' || '' }}
           path: build/windows/x64/runner/Release/
           if-no-files-found: error

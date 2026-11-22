@@ -1,6 +1,7 @@
 #include "runtime_fixture.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 
@@ -119,6 +120,24 @@ RuntimeResult CheckInterrupt() {
   return interrupted ? RuntimeResult::ok : RuntimeResult::interrupt;
 }
 
+struct Catalog {
+  FixtureCatalog query;
+  void* opaque;
+  int count = 0;
+};
+
+JSValue FixtureRequest(JSContext* ctx, JSValueConst, int argc,
+                       JSValueConst* argv) {
+  auto& catalog = *static_cast<Catalog*>(JS_GetContextOpaque(ctx));
+  int32_t request = 0;
+  if (argc != 1 || !JS_IsNumber(argv[0]) ||
+      JS_ToInt32(ctx, &request, argv[0]) < 0 || request != 1 ||
+      ++catalog.count != 1 || catalog.query(catalog.opaque, request) != 1) {
+    return JS_ThrowTypeError(ctx, "Fixture catalogue denied");
+  }
+  return JS_NewInt32(ctx, 1);
+}
+
 }  // namespace
 
 RuntimeResult RunRuntimeFixtures() {
@@ -127,6 +146,92 @@ RuntimeResult RunRuntimeFixtures() {
     if (result != RuntimeResult::ok) return result;
   }
   return RuntimeResult::ok;
+}
+
+int RunPlaybackFixture(bool timeout, FixtureCatalog query, void* opaque) {
+  if (!query) return 91;
+  Runtime runtime;
+  if (!runtime) return 91;
+  runtime.SetBudget(1s);
+  auto* context = runtime.context();
+  Catalog catalog{query, opaque};
+  JS_SetContextOpaque(context, &catalog);
+  const auto global = JS_GetGlobalObject(context);
+  const auto bridge = JS_NewCFunction(context, FixtureRequest, "fixtureRequest", 1);
+  const int installed = JS_SetPropertyStr(context, global, "fixtureRequest", bridge);
+  JS_FreeValue(context, global);
+  if (installed < 0) return 91;
+  auto bootstrap = runtime.Eval(R"JS(
+    let handler, ready;
+    const lx = Object.freeze({
+      EVENT_NAMES: Object.freeze({ request: 'request', inited: 'inited' }),
+      on(name, callback) {
+        if (name !== 'request' || handler || typeof callback !== 'function') {
+          throw new TypeError('Unexpected fixture handler');
+        }
+        handler = callback;
+      },
+      send(name, payload) {
+        if (name !== 'inited' || ready) throw new TypeError('Unexpected init');
+        const tx = payload.sources.tx;
+        ready = tx.type === 'music' && tx.actions.length === 1 &&
+          tx.actions[0] === 'musicUrl' && tx.qualitys.length === 1 &&
+          tx.qualitys[0] === '128k';
+        if (!ready) throw new TypeError('Unsupported fixture');
+      },
+      request(url, options, callback) {
+        if (url !== 'https://catalog.fixture.invalid/wave' ||
+            options.method !== 'GET') throw new TypeError('Unexpected request');
+        const reply = fixtureRequest(1);
+        Promise.resolve(reply).then(body => callback(null, { statusCode: 200 }, body));
+      },
+    });
+    const track = Object.freeze({ source: 'tx', action: 'musicUrl',
+      info: Object.freeze({ type: '128k', musicInfo: Object.freeze({
+        songmid: 'motifFixture', strMediaMid: 'motifFixture',
+      }) }) });
+    const address = 'https://raw.githubusercontent.com/jiaaro/pydub/' +
+      '103e339d3bc7a9a58a9f1de65f7d8074659b5f5a/test/data/test-dc_offset.wav';
+    const init = () => lx.send(lx.EVENT_NAMES.inited, {
+      sources: { tx: { type: 'music', actions: ['musicUrl'], qualitys: ['128k'] } }
+    });
+    function resolveFixture() {
+      if (!ready || !handler) throw new TypeError('Fixture not initialized');
+      return handler(track).then(result => { globalThis.checked = result === address; });
+    }
+    globalThis.checked = false;
+  )JS");
+  bool ok = !JS_IsException(bootstrap);
+  JS_FreeValue(context, bootstrap);
+  if (!ok) return 92;
+  runtime.SetBudget(timeout ? 200ms : 2s);
+  auto run = runtime.Eval(timeout ? R"JS(
+    lx.on(lx.EVENT_NAMES.request, () => { while (true) {} });
+    init();
+    resolveFixture();
+  )JS" : R"JS(
+    lx.on(lx.EVENT_NAMES.request, ({ source, action, info }) => {
+      if (source !== 'tx' || action !== 'musicUrl' || info.type !== '128k' ||
+          info.musicInfo.strMediaMid !== 'motifFixture') throw new TypeError('Fixture track');
+      return new Promise((resolve, reject) => {
+        lx.request('https://catalog.fixture.invalid/wave', { method: 'GET' },
+          (error, response, body) => {
+            if (error || response.statusCode !== 200 || body !== 1) reject();
+            else resolve(address);
+          });
+      });
+    });
+    init();
+    resolveFixture();
+  )JS");
+  ok = !JS_IsException(run);
+  JS_FreeValue(context, run);
+  if (timeout) return !ok && runtime.interrupted() && catalog.count == 0 ? 90 : 93;
+  if (!ok || !runtime.RunJobs() || catalog.count != 1) return 93;
+  auto checked = runtime.Eval("globalThis.checked === true");
+  ok = JS_IsBool(checked) && JS_ToBool(context, checked) == 1;
+  JS_FreeValue(context, checked);
+  return ok ? 0 : 94;
 }
 
 }  // namespace motif::lx_probe

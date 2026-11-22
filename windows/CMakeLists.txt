@@ -57,6 +57,13 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
+if("$ENV{MOTIF_LX_APP_FIXTURE}" STREQUAL "true")
+  # The helper hosts only the fixed script and its isolated worker.
+  set(MOTIF_LX_RUNTIME_ONLY ON)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../tool/lx_prototype"
+    "${CMAKE_CURRENT_BINARY_DIR}/motif-lx-fixture")
+  add_dependencies(${BINARY_NAME} motif_lx_probe motif_lx_worker)
+endif()
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
@@ -79,6 +86,13 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
+
+if(TARGET motif_lx_probe)
+  install(TARGETS motif_lx_probe motif_lx_worker
+    RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../tool/lx_prototype/licenses/quickjs-ng/LICENSE"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/licenses/quickjs-ng" COMPONENT Runtime)
+endif()
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)

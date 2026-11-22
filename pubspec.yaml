@@ -69,6 +69,7 @@ flutter:
   uses-material-design: true
   assets:
     - packages/motif_taglib/LICENSE
+    - tool/lx_prototype/licenses/quickjs-ng/LICENSE
 
   # To add assets to your application, add an assets section, like this:
   # assets:

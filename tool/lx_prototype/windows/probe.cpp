@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace {
 using namespace motif::lx_probe;
@@ -290,10 +291,48 @@ void VerifyWorkerJob(HANDLE job, HANDLE process) {
   }
 }
 
+bool AppCancelled() {
+  const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  if (!input || input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_PIPE) {
+    return false;
+  }
+  DWORD waiting = 0;
+  if (!PeekNamedPipe(input, nullptr, 0, nullptr, &waiting, nullptr)) return true;
+  return waiting != 0;
+}
+
+void WaitForPlaybackFixture(HANDLE process, const ProgressCell& progress,
+                            bool timeout, bool app) {
+  const auto expires = GetTickCount64() + kFixtureTimeout;
+  bool replied = false;
+  for (;;) {
+    if (app && AppCancelled()) {
+      SetLastError(ERROR_CANCELLED);
+      Fail("app cancelled fixture");
+    }
+    const LONG request = progress.CatalogRequest();
+    if (request != 0) {
+      Require(!timeout && request == 1, "verify bounded fixture catalogue request");
+      if (!replied) {
+        progress.ReplyCatalog(1);
+        replied = true;
+      }
+    }
+    const DWORD state = WaitForSingleObject(process, 5);
+    if (state == WAIT_OBJECT_0) break;
+    Require(state == WAIT_TIMEOUT && GetTickCount64() < expires,
+            "wait for fixed playback fixture");
+  }
+  Require(replied != timeout, "verify fixture catalogue callback count");
+}
+
 // The worker inherits only a readiness event and a small progress section.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
-            const Loopback& listener, u_short port, bool stall) {
+            const Loopback& listener, u_short port, std::wstring_view mode,
+            bool app = false) {
   VerifyListener(listener);
+  const bool stall = mode == L"stall";
+  const bool playback_fixture = mode == L"lx-fixed" || mode == L"lx-timeout";
   const Handle job(CreateJobObjectW(nullptr, nullptr));
   Require(job.value, "create fixture job");
   ConfigureWorkerJob(job.value);
@@ -321,8 +360,8 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   std::wstring args = L"motif-lx-fixture " +
       SidString(profile.sid) + L" \"" + files.canary + L"\" " +
       std::to_wstring(port) + L" " +
-      std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) +
-      (stall ? L" stall " : L" bounded ") +
+      std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) + L" " +
+      std::wstring(mode) + L" " +
       std::to_wstring(reinterpret_cast<std::uintptr_t>(section.value));
   auto environment = WorkerEnvironment();
   STARTUPINFOEXW startup{};
@@ -343,7 +382,15 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     VerifyMitigations(process.value);
     Require(ResumeThread(thread.value) == 1, "start verified fixture");
     const HANDLE events[]{ready.value, process.value};
-    const DWORD ready_result = WaitForMultipleObjects(2, events, FALSE, kStartupTimeout);
+    const auto expires = GetTickCount64() + kStartupTimeout;
+    DWORD ready_result;
+    do {
+      if (app && AppCancelled()) {
+        SetLastError(ERROR_CANCELLED);
+        Fail("app cancelled fixture before readiness");
+      }
+      ready_result = WaitForMultipleObjects(2, events, FALSE, app ? 20 : kStartupTimeout);
+    } while (app && ready_result == WAIT_TIMEOUT && GetTickCount64() < expires);
     if (ready_result != WAIT_OBJECT_0) {
       std::fprintf(stderr, "Worker last completed startup stage %ld (network status %ld)\n",
                    progress.Read(), progress.NetworkError());
@@ -361,13 +408,16 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
                   TerminateJobObject(job.value, 0x71) &&
                   WaitForSingleObject(process.value, kFixtureTimeout) == WAIT_OBJECT_0,
               "reap a stalled worker");
+    } else if (playback_fixture) {
+      WaitForPlaybackFixture(process.value, progress, mode == L"lx-timeout", app);
     } else {
       Require(WaitForSingleObject(process.value, kFixtureTimeout) == WAIT_OBJECT_0,
               "bounded QuickJS fixtures");
     }
     DWORD code = 0;
     Require(GetExitCodeProcess(process.value, &code), "read fixture result");
-    if (code != (stall ? 0x71 : 0)) {
+    const DWORD expected = stall ? 0x71 : mode == L"lx-timeout" ? 90 : 0;
+    if (code != expected) {
       SetLastError(code);
       Fail("fixture returned unexpected result");
     }
@@ -384,7 +434,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   }
 }
 
-int Run() {
+int Run(std::wstring_view app_mode = {}) {
   const auto unique = UniqueName();
   HANDLE raw = nullptr;
   Require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE |
@@ -407,18 +457,27 @@ int Run() {
   const Winsock winsock;
   Loopback server;
   const auto port = BindLoopback(server);
-  Launch(restricted.value, files, profile, server, port, false);
-  Launch(restricted.value, files, profile, server, port, true);
-  Launch(restricted.value, files, profile, server, port, false);
+  if (!app_mode.empty()) {
+    Launch(restricted.value, files, profile, server, port, app_mode, true);
+    std::puts(app_mode == L"lx-timeout" ? "MOTIF_LX_TIMEOUT" : "MOTIF_LX_FIXED_WAVE");
+    return 0;
+  }
+  Launch(restricted.value, files, profile, server, port, L"bounded");
+  Launch(restricted.value, files, profile, server, port, L"stall");
+  Launch(restricted.value, files, profile, server, port, L"bounded");
+  Launch(restricted.value, files, profile, server, port, L"lx-fixed");
+  Launch(restricted.value, files, profile, server, port, L"lx-timeout");
   std::puts("PASS Windows token, Win32k lockdown, child process, canary, TCP, QuickJS, timeout and restart");
   return 0;
 }
 
 }  // namespace
 
-int wmain(int argc, wchar_t**) {
+int wmain(int argc, wchar_t** argv) {
   try {
     if (argc == 1) return Run();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--app-fixture") return Run(L"lx-fixed");
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--app-fixture-timeout") return Run(L"lx-timeout");
     return 81;
   } catch (const std::exception&) {
     return 82;
