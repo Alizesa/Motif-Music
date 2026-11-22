@@ -92,11 +92,7 @@ class QqMusicClient implements PlaybackUrlResolver {
           'get_song_detail_yqq',
           {'song_mid': mid, 'song_type': songType, 'song_id': 0},
         );
-        final track = parseQqTrack(data['track_info']);
-        if (track.mid != mid || track.songType != songType) {
-          throw const OnlineException(OnlineErrorKind.malformedResponse);
-        }
-        return track;
+        return parseQqSongDetail(data, expectedMid: mid);
       },
     );
   }

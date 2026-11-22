@@ -18,6 +18,18 @@ import 'qq_request_protocol.dart';
 
 enum _Comm { playback, personalized, playlist, search, web }
 
+enum _ResponseShape { standard, feed, recentPlaylists, radio }
+
+enum _RpcLevel {
+  root('顶层'),
+  module('模块'),
+  payload('数据'),
+  item('条目');
+
+  const _RpcLevel(this.label);
+  final String label;
+}
+
 /// Authenticated QQ catalog/recommendation operations share one bounded queue.
 /// A captured epoch owns every cache entry and every response publication.
 class QqAccountApi {
@@ -136,6 +148,7 @@ class QqAccountApi {
     Map<String, Object?> params, {
     String requestKey = 'req_0',
     _Comm comm = _Comm.playback,
+    _ResponseShape shape = _ResponseShape.standard,
     Duration ttl = const Duration(minutes: 5),
     QqSessionSnapshot? captured,
   }) async {
@@ -153,7 +166,8 @@ class QqAccountApi {
     final first = await _coordinator.run<_RpcOutcome>(
       cacheKey,
       ttl: ttl,
-      request: () => _post(snapshot, module, method, params, requestKey, comm),
+      request: () =>
+          _post(snapshot, module, method, params, requestKey, comm, shape),
     );
     _active(snapshot);
     if (first.challenge == null) return first.data!;
@@ -179,6 +193,7 @@ class QqAccountApi {
         params,
         requestKey,
         comm,
+        shape,
         cookie: cookie,
       ),
     );
@@ -196,7 +211,8 @@ class QqAccountApi {
     String method,
     Map<String, Object?> params,
     String requestKey,
-    _Comm comm, {
+    _Comm comm,
+    _ResponseShape shape, {
     String? cookie,
   }) async {
     _active(snapshot);
@@ -245,7 +261,10 @@ class QqAccountApi {
     }
     _active(snapshot);
     if (response.status == 429 || response.status == 503) {
-      throw const OnlineException(OnlineErrorKind.rateLimited);
+      throw _QqRpcException(
+        OnlineErrorKind.rateLimited,
+        httpStatus: response.status,
+      );
     }
     if (response.status == 401) {
       await sessions.reject(snapshot);
@@ -253,10 +272,16 @@ class QqAccountApi {
     }
     if (response.status == 403 ||
         response.status >= 300 && response.status < 400) {
-      throw const OnlineException(OnlineErrorKind.rejected);
+      throw _QqRpcException(
+        OnlineErrorKind.rejected,
+        httpStatus: response.status,
+      );
     }
     if (response.status != 200) {
-      throw const OnlineException(OnlineErrorKind.transport);
+      throw _QqRpcException(
+        OnlineErrorKind.transport,
+        httpStatus: response.status,
+      );
     }
     Map<String, Object?> root;
     try {
@@ -266,17 +291,44 @@ class QqAccountApi {
     }
     _active(snapshot);
     final merged = mergeQqCookies(sentCookie, response.cookie);
-    final topFailure = await _businessFailure(root, snapshot, merged);
+    final topFailure = await _businessFailure(
+      root,
+      snapshot,
+      merged,
+      _RpcLevel.root,
+    );
     if (topFailure != null) return topFailure;
-    final sub = qqObject(root[requestKey]);
-    final subFailure = await _businessFailure(sub, snapshot, merged);
+    final requested = root[requestKey];
+    final sub = qqObject(
+      shape == _ResponseShape.radio && requested is! Map<String, Object?>
+          ? root['request']
+          : requested,
+    );
+    final subFailure = await _businessFailure(
+      sub,
+      snapshot,
+      merged,
+      _RpcLevel.module,
+    );
     if (subFailure != null) return subFailure;
     final data = qqObject(sub['data']);
-    for (final field in ['code', 'subcode']) {
+    for (final field in [
+      'code',
+      'subcode',
+      if (shape == _ResponseShape.feed) 'retcode',
+    ]) {
+      // QQ can return -300 for recent playlists with an explicit empty list.
+      if (shape == _ResponseShape.recentPlaylists &&
+          field == 'code' &&
+          qqInt(data[field]) == -300 &&
+          qqRecentPlaylistEntries(data)?.isEmpty == true) {
+        continue;
+      }
       final failure = await _businessFailure(
         data,
         snapshot,
         merged,
+        _RpcLevel.payload,
         field: field,
         optional: true,
       );
@@ -292,6 +344,7 @@ class QqAccountApi {
           item,
           snapshot,
           merged,
+          _RpcLevel.item,
           field: 'result',
           verificationFallback: data,
         );
@@ -304,7 +357,8 @@ class QqAccountApi {
   Future<_RpcOutcome?> _businessFailure(
     Map<String, Object?> value,
     QqSessionSnapshot snapshot,
-    String cookie, {
+    String cookie,
+    _RpcLevel level, {
     String field = 'code',
     bool optional = false,
     Map<String, Object?>? verificationFallback,
@@ -329,10 +383,14 @@ class QqAccountApi {
       await sessions.reject(snapshot);
       throw const OnlineException(OnlineErrorKind.sessionExpired);
     }
-    if (qqBusinessRateLimitCodes.contains(code)) {
-      throw const OnlineException(OnlineErrorKind.rateLimited);
-    }
-    throw const OnlineException(OnlineErrorKind.rejected);
+    // This envelope represents a single operation. Only known throttling or
+    // security blocks may stop unrelated requests in the shared queue.
+    final kind = qqBusinessRateLimitCodes.contains(code)
+        ? OnlineErrorKind.rateLimited
+        : code == 403 || qqVerificationCodes.contains(code)
+        ? OnlineErrorKind.rejected
+        : OnlineErrorKind.operationRejected;
+    throw _QqRpcException(kind, level: level, apiCode: code);
   }
 
   Future<QqSearchPage> search(
@@ -392,6 +450,7 @@ class QqAccountApi {
       {'id': 99, 'num': 20, 'from': 0, 'scene': 0, 'song_ids': <int>[]},
       requestKey: 'songlist',
       comm: _Comm.personalized,
+      shape: _ResponseShape.radio,
       ttl: Duration.zero,
       captured: session,
     );
@@ -418,6 +477,7 @@ class QqAccountApi {
       'GetPlayRecentlyInfo',
       {'type': 4, 'updateTime': 0, 'requestCnt': 500},
       requestKey: 'req_1',
+      shape: _ResponseShape.recentPlaylists,
     );
     return parseQqRecentPlaylists(data);
   }
@@ -448,6 +508,7 @@ class QqAccountApi {
           'client_time_zone': 'Asia/Shanghai',
         },
       },
+      shape: _ResponseShape.feed,
     );
     final parsed = parseQqHomeFeed(data, page: page);
     final keys = <String>{
@@ -548,14 +609,7 @@ class QqAccountApi {
       comm: _Comm.web,
       ttl: const Duration(hours: 1),
     );
-    final track = parseQqTrack(data['track_info']);
-    if (songId > 0 && track.songId != songId) {
-      throw const OnlineException(OnlineErrorKind.malformedResponse);
-    }
-    if (mid.isNotEmpty && track.mid != mid || track.songType != songType) {
-      throw const OnlineException(OnlineErrorKind.malformedResponse);
-    }
-    return track;
+    return parseQqSongDetail(data, expectedMid: mid, expectedSongId: songId);
   }
 
   Future<OnlineStream> resolve(QqTrack track, OnlineQuality quality) async {
@@ -600,6 +654,38 @@ class _RpcOutcome {
   const _RpcOutcome.challenge(this.challenge) : data = null;
   final Map<String, Object?>? data;
   final QqSecurityChallenge? challenge;
+}
+
+class _QqRpcException extends OnlineException {
+  const _QqRpcException(
+    super.kind, {
+    this.httpStatus = 200,
+    this.level,
+    this.apiCode,
+    super.retryAt,
+  });
+
+  final int httpStatus;
+  final _RpcLevel? level;
+  final int? apiCode;
+
+  @override
+  OnlineException withRetryAt(DateTime value) => _QqRpcException(
+    kind,
+    httpStatus: httpStatus,
+    level: level,
+    apiCode: apiCode,
+    retryAt: value,
+  );
+
+  @override
+  String toString() {
+    final code = apiCode;
+    final details = code == null
+        ? 'HTTP $httpStatus'
+        : 'HTTP $httpStatus，${level!.label}业务码 $code';
+    return '${super.toString()}（$details）';
+  }
 }
 
 String qqStableGuid(String deviceId) {

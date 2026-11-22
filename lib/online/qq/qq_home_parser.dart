@@ -151,9 +151,11 @@ List<QqPlaylist> parseQqPersonalizedPlaylists(Map<String, Object?> data) {
   return List.unmodifiable(playlists.values);
 }
 
+List<Object?>? qqRecentPlaylistEntries(Map<String, Object?> responseData) =>
+    _array(_object(responseData['data'])?['geDanList']);
+
 List<QqPlaylist> parseQqRecentPlaylists(Map<String, Object?> responseData) {
-  final data = _object(responseData['data']);
-  final values = _array(data?['geDanList']);
+  final values = qqRecentPlaylistEntries(responseData);
   if (values == null) {
     throw const OnlineException(OnlineErrorKind.malformedResponse);
   }

@@ -478,6 +478,27 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
     api.close();
     await session.close();
   },
+  'radio accepts the MusicOne alternate response envelope': () async {
+    final session = await signedSession(MemoryQqVault());
+    final transport = FakeQqAccountTransport()
+      ..reply = (_) async => accountResponse({
+        'code': 0,
+        'request': {
+          'code': 0,
+          'data': {
+            'track_list': [songJson(mid: 'radioMid1')],
+          },
+        },
+      });
+    final api = QqAccountApi(sessions: session, transport: transport);
+    try {
+      final tracks = await api.radio();
+      _check(tracks.single.mid == 'radioMid1', 'Lost alternate radio tracks');
+    } finally {
+      api.close();
+      await session.close();
+    }
+  },
   'authenticated vkey has one consistent music account in comm and params':
       () async {
         final session = await signedSession(MemoryQqVault());
@@ -696,6 +717,28 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
         api.close();
         await session.close();
       },
+  'feed rejects a failed retcode even when the outer response succeeds':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => accountModuleResponse(request, {
+            'retcode': '-25',
+            'v_shelf': <Object?>[],
+            'msg': 'fixture-server-body',
+          });
+        final api = QqAccountApi(sessions: session, transport: transport);
+        try {
+          final error = await _throws<OnlineException>(api.homeFeed);
+          _check(
+            error.toString().contains('-25') &&
+                !error.toString().contains('fixture-server-body'),
+            'Feed error lost its safe status or exposed the server body',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
   'anonymous vkey uses the mobile envelope with the chosen quality': () async {
     final transport = FakeQqTransport()
       ..reply = (_) async => moduleResponse({
@@ -785,13 +828,14 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
         );
         final client = QqMusicClient(transport: public, accountApi: api);
         try {
-          final result = await client.detail('songMid001');
+          final result = await client.detail('songMid001', songType: 1);
           _check(
             private.requests.length == 1 && public.requests.isEmpty,
             'Signed detail used the anonymous catalog transport',
           );
           final request = private.requests.single;
           final comm = request.jsonBody!['comm'] as Map;
+          final params = (request.jsonBody!['req_1'] as Map)['param'] as Map;
           _check(
             comm['ct'] == 24 &&
                 comm['cv'] == 4747474 &&
@@ -799,8 +843,10 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
                 request.userAgent == qqWebUserAgent &&
                 request.origin == 'https://y.qq.com' &&
                 request.cookie.contains('musickey=fixture-key') &&
-                result.mid == 'songMid001',
-            'Signed detail profile or identity did not match',
+                params['song_type'] == 1 &&
+                result.mid == 'songMid001' &&
+                result.songType == 0,
+            'Signed detail lost the type hint or rejected the returned type',
           );
         } finally {
           client.close();
@@ -808,6 +854,20 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
           await session.close();
         }
       },
+  'anonymous detail trusts the returned type for the same MID': () async {
+    final transport = FakeQqTransport()
+      ..reply = (_) async => moduleResponse({'track_info': songJson()});
+    final client = QqMusicClient(transport: transport);
+    try {
+      final result = await client.detail('songMid001', songType: 1);
+      _check(
+        result.mid == 'songMid001' && result.songType == 0,
+        'Detail must return the server type for the verified MID',
+      );
+    } finally {
+      client.close();
+    }
+  },
   'daily recommendation preserves the alternate encrypted account field':
       () async {
         final session = await signedSession(MemoryQqVault());
@@ -1000,6 +1060,7 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
         final second = await _throws<OnlineException>(api.recentPlaylists);
         _check(
           first.kind == OnlineErrorKind.rateLimited &&
+              first.toString().contains('顶层业务码 $code') &&
               second.kind == OnlineErrorKind.rateLimited &&
               transport.requests.length == 1 &&
               session.account?.id == '42',
@@ -1011,6 +1072,35 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
       }
     }
   },
+  'an HTTP restriction still pauses the signed queue without exposing its body':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (_) async =>
+              accountResponse('fixture-server-body', status: 403);
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final first = await _throws<OnlineException>(api.daily);
+          final second = await _throws<OnlineException>(api.radio);
+          _check(
+            first.kind == OnlineErrorKind.rejected &&
+                first.retryAt != null &&
+                first.toString().contains('HTTP 403') &&
+                !first.toString().contains('fixture-server-body') &&
+                second.retryAt == first.retryAt &&
+                transport.requests.length == 1 &&
+                session.account?.id == '42',
+            'HTTP restriction did not hold the queue or leaked its body',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
   'a completed proof does not repeatedly open a cached security challenge':
       () async {
         final session = await signedSession(MemoryQqVault());
@@ -1462,6 +1552,81 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
                 comm['qq'] == '42' &&
                 transport.requests.single.userAgent == qqMusicUserAgent,
             'Recent playlists drifted to played songs or another account',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'recent playlists return empty for code -300 with an explicit empty list':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => request.jsonBody!.containsKey('req_1')
+              ? accountModuleResponse(request, {
+                  'code': -300,
+                  'data': {'geDanList': <Object?>[]},
+                })
+              : accountModuleResponse(request, {
+                  'songlist': [songJson(mid: 'dailyMid1')],
+                });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final recent = await api.recentPlaylists();
+          final daily = await api.daily();
+          _check(
+            recent.isEmpty &&
+                daily.single.mid == 'dailyMid1' &&
+                session.account?.id == '42' &&
+                transport.requests.length == 2,
+            'Empty recent history stopped another signed recommendation',
+          );
+        } finally {
+          api.close();
+          await session.close();
+        }
+      },
+  'a failed recent payload leaves other queued recommendations runnable':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final transport = FakeQqAccountTransport()
+          ..reply = (request) async => request.jsonBody!.containsKey('req_1')
+              ? accountModuleResponse(request, {
+                  'code': -300,
+                  'data': {
+                    'geDanList': [
+                      {'id': 1, 'name': 'Not an empty list'},
+                    ],
+                  },
+                  'msg': 'fixture-server-body',
+                })
+              : accountModuleResponse(request, {
+                  'songlist': [songJson(mid: 'dailyMid1')],
+                });
+        final api = QqAccountApi(
+          sessions: session,
+          transport: transport,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final results = await Future.wait<Object>([
+            _throws<OnlineException>(api.recentPlaylists),
+            api.daily(),
+          ]);
+          final error = results[0] as OnlineException;
+          _check(
+            error.kind == OnlineErrorKind.operationRejected &&
+                error.retryAt == null &&
+                error.toString().contains('-300') &&
+                !error.toString().contains('fixture-server-body') &&
+                (results[1] as List).length == 1 &&
+                transport.requests.length == 2 &&
+                session.account?.id == '42',
+            'An operation failure paused the queue or lost its safe status',
           );
         } finally {
           api.close();

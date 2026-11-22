@@ -107,6 +107,21 @@ QqTrack parseQqTrack(Object? value) {
   );
 }
 
+QqTrack parseQqSongDetail(
+  Map<String, Object?> data, {
+  required String expectedMid,
+  int expectedSongId = 0,
+}) {
+  final track = parseQqTrack(data['track_info']);
+  // The requested type is a hint. The detail endpoint can canonicalize it.
+  if ((expectedMid.isEmpty && expectedSongId <= 0) ||
+      (expectedMid.isNotEmpty && track.mid != expectedMid) ||
+      (expectedSongId > 0 && track.songId != expectedSongId)) {
+    throw const OnlineException(OnlineErrorKind.malformedResponse);
+  }
+  return track;
+}
+
 QqSearchPage parseQqSearchPage(
   Map<String, Object?> root,
   int page,
