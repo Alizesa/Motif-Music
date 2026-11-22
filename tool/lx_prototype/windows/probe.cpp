@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <userenv.h>
 
 #include <array>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -354,6 +356,30 @@ int Worker(wchar_t** argv) {
   return static_cast<int>(motif::lx_probe::RunRuntimeFixtures());
 }
 
+std::wstring WorkerEnvironment() {
+  wchar_t* raw = nullptr;
+  const HRESULT status =
+      SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &raw);
+  const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> local_data(raw, CoTaskMemFree);
+  if (FAILED(status)) SetLastError(static_cast<DWORD>(status));
+  Require(SUCCEEDED(status) && raw && *raw, "resolve Local AppData for AppContainer");
+
+  std::array<wchar_t, 32768> windows{};
+  const UINT length = GetSystemWindowsDirectoryW(
+      windows.data(), static_cast<UINT>(windows.size()));
+  Require(length > 0 && length < windows.size(), "resolve system Windows directory");
+
+  // Windows needs LOCALAPPDATA to locate the AppContainer profile. Seed only
+  // system paths, so the worker does not inherit the runner's environment.
+  std::wstring block = L"LOCALAPPDATA=" + std::wstring(local_data.get());
+  block.push_back(L'\0');
+  block += L"SystemRoot=" + std::wstring(windows.data(), length);
+  block.push_back(L'\0');
+  block += L"WINDIR=" + std::wstring(windows.data(), length);
+  block.push_back(L'\0');
+  return block;  // std::wstring adds the final NUL for CreateProcessAsUserW.
+}
+
 // Only the readiness signal is inherited. Fixtures report via the process exit
 // code, so the controller has no command or network IPC surface.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
@@ -391,7 +417,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
       std::to_wstring(port) + L" " +
       std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) +
       (stall ? L" stall" : L" bounded");
-  wchar_t empty_environment[2]{};
+  auto environment = WorkerEnvironment();
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
   startup.StartupInfo.lpDesktop = desktop.data();
@@ -400,7 +426,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   Require(CreateProcessAsUserW(token, files.worker.c_str(), args.data(),
       nullptr, nullptr, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW |
           EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-      empty_environment, files.folder.c_str(), &startup.StartupInfo, &child),
+      environment.data(), files.folder.c_str(), &startup.StartupInfo, &child),
       "create suspended restricted fixture");
   const Handle process(child.hProcess);
   const Handle thread(child.hThread);

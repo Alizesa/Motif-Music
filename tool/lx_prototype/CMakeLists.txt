@@ -47,7 +47,7 @@ elseif(WIN32)
   add_executable(motif_lx_probe windows/probe.cpp)
   target_compile_definitions(motif_lx_probe PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
-  target_link_libraries(motif_lx_probe PRIVATE lx_fixture advapi32 ole32 user32 userenv ws2_32)
+  target_link_libraries(motif_lx_probe PRIVATE lx_fixture advapi32 ole32 shell32 user32 userenv uuid ws2_32)
   if(MINGW)
     target_link_options(motif_lx_probe PRIVATE -municode)
   endif()

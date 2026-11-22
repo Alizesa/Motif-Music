@@ -56,7 +56,15 @@ jobs:
           java-version: '17'
       - name: Prepare Android fixture dependencies
         run: |
-          sdkmanager 'platforms;android-36' 'ndk;28.2.13676358' 'cmake;3.22.1' 'emulator' 'system-images;android-35;google_apis;x86_64'
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          cmdline="$sdk/cmdline-tools/latest/bin"
+          if [[ ! -x "$cmdline/sdkmanager" || ! -x "$cmdline/avdmanager" ]]; then
+            echo "::error::Android SDK command-line tools are missing from $cmdline"
+            exit 1
+          fi
+          "$cmdline/sdkmanager" --sdk_root="$sdk" 'platforms;android-36' 'platform-tools' 'ndk;28.2.13676358' 'cmake;3.22.1' 'emulator' 'system-images;android-35;google_apis;x86_64'
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' "$sdk" "$sdk" >> "$GITHUB_ENV"
+          printf '%s\n' "$cmdline" "$sdk/platform-tools" "$sdk/emulator" >> "$GITHUB_PATH"
           cmake -DMOTIF_MPV_PLATFORM=android-x86_64 "-DMOTIF_MPV_OUTPUT=$RUNNER_TEMP/motif-lx/jni/x86_64/libmpv_audio_kit.so" -P tool/lx_prototype/fetch_mpv.cmake
           cmake -DMOTIF_MPV_PLATFORM=android-arm64 "-DMOTIF_MPV_OUTPUT=$RUNNER_TEMP/motif-lx/jni/arm64-v8a/libmpv_audio_kit.so" -P tool/lx_prototype/fetch_mpv.cmake
       - name: Build the standalone probe and instrumentation APKs
