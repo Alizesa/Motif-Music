@@ -57,9 +57,9 @@ final class LxApiRequest {
   final Uint8List? body;
   final Duration timeout;
 
-  static LxApiRequest parse(Map<String, Object?> message, Set<String> hosts) {
+  static LxApiRequest parse(Map<String, Object?> message) {
     final uri = checkedLxUrl(message['url']);
-    if (uri == null || !hosts.contains(uri.host)) {
+    if (uri == null) {
       throw const OnlineException(OnlineErrorKind.rejected);
     }
     final options = message['options'];
@@ -141,7 +141,7 @@ final class LxApiRequest {
   }
 }
 
-/// Runs one authorized exchange with a total deadline.
+/// Runs one host-checked public HTTPS exchange with a total deadline.
 final class LxHttpsTransport {
   const LxHttpsTransport();
 
@@ -261,11 +261,31 @@ Future<Uint8List> _readApiBody(LxWireResponse reply, String method) async {
   return buffer.takeBytes();
 }
 
+typedef LxMediaOpen = Future<FixtureRangeResponse> Function(
+  Uri uri,
+  Map<String, String> headers,
+  PcmCancellation cancellation,
+);
+
+Future<FixtureRangeResponse> _openMediaRange(
+  Uri uri,
+  Map<String, String> headers,
+  PcmCancellation cancellation,
+) async {
+  final reply = await openLxHttps(uri, 'GET', headers, null, cancellation);
+  return FixtureRangeResponse(
+    status: reply.status,
+    headers: reply.headers,
+    body: reply.body,
+  );
+}
+
 final class LxMediaTransport implements FixtureRangeTransport {
-  LxMediaTransport(this.uri, this.allowedHosts, this.owner);
+  LxMediaTransport(this.uri, this.owner, {LxMediaOpen? open})
+    : _open = open ?? _openMediaRange;
   final Uri uri;
-  final Set<String> allowedHosts;
   final PcmCancellation owner;
+  final LxMediaOpen _open;
   Uri? _representation;
 
   @override
@@ -281,21 +301,14 @@ final class LxMediaTransport implements FixtureRangeTransport {
     try {
       for (var hop = 0; hop <= 3; hop++) {
         scope.check();
-        if (checkedLxUrl(next.toString()) == null ||
-            !allowedHosts.contains(next.host)) {
+        if (checkedLxUrl(next.toString()) == null) {
           throw const OnlineException(OnlineErrorKind.rejected);
         }
-        final reply = await openLxHttps(
-          next,
-          'GET',
-          {
-            'accept': 'audio/wav, application/octet-stream',
-            'range': 'bytes=$offset-',
-            'if-range': ?validator,
-          },
-          null,
-          scope,
-        );
+        final reply = await _open(next, {
+          'accept': 'audio/wav, application/octet-stream',
+          'range': 'bytes=$offset-',
+          'if-range': ?validator,
+        }, scope);
         if (!const {301, 302, 303, 307, 308}.contains(reply.status)) {
           if (offset == 0 && reply.status == 206) _representation = next;
           return FixtureRangeResponse(

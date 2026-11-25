@@ -61,7 +61,7 @@ final class FixtureWave implements ControlledPcmInput {
     return openManaged(transport, cancellation);
   }
 
-  /// The transport owns the URL and checks the current grant on every open.
+  /// The transport owns the URL and checks its destination on every open.
   static Future<FixtureWave> openManaged(
     FixtureRangeTransport transport,
     PcmCancellation cancellation,

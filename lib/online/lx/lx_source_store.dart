@@ -7,10 +7,8 @@ import 'package:crypto/crypto.dart';
 
 import '../domain/playback_source.dart';
 import 'lx_native_worker.dart';
-import 'lx_network.dart';
 
 const lxSourceCountLimit = 12;
-const lxHostCountLimit = 8;
 final _digestPattern = RegExp(r'^[0-9a-f]{64}$');
 final _idPattern = RegExp(r'^lx-[0-9a-f]{32}$');
 const _metadataLimits = {
@@ -61,30 +59,6 @@ final class LxScriptDocument {
   }
 }
 
-final class LxSourceGrant {
-  LxSourceGrant({
-    Iterable<String> api = const [],
-    Iterable<String> media = const [],
-  }) : api = _hosts(api),
-       media = _hosts(media);
-
-  final Set<String> api;
-  final Set<String> media;
-
-  static Set<String> _hosts(Iterable<String> input) {
-    final hosts = <String>{};
-    for (final value in input) {
-      final host = lxHost(value);
-      if (host == null) throw const FormatException('LX hostname');
-      hosts.add(host);
-      if (hosts.length > lxHostCountLimit) {
-        throw const FormatException('LX host count');
-      }
-    }
-    return Set.unmodifiable(hosts);
-  }
-}
-
 final class LxStoredSource {
   LxStoredSource({
     required this.id,
@@ -92,12 +66,12 @@ final class LxStoredSource {
     required this.info,
     required this.version,
     required this.enabled,
-    required this.grant,
     Iterable<OnlineQuality> qualities = const [],
   }) : qualities = Set.unmodifiable(qualities);
 
   factory LxStoredSource.newScript(
-    LxScriptDocument document, [
+    LxScriptDocument document,
+    Iterable<OnlineQuality> qualities, [
     LxStoredSource? previous,
   ]) {
     final random = Random.secure();
@@ -109,8 +83,8 @@ final class LxStoredSource {
       digest: document.digest,
       info: document.info,
       version: (previous?.version ?? 0) + 1,
-      enabled: false,
-      grant: LxSourceGrant(),
+      enabled: true,
+      qualities: qualities,
     );
   }
 
@@ -119,7 +93,6 @@ final class LxStoredSource {
   final Map<String, String> info;
   final int version;
   final bool enabled;
-  final LxSourceGrant grant;
   final Set<OnlineQuality> qualities;
 
   String get name {
@@ -131,7 +104,6 @@ final class LxStoredSource {
 
   LxStoredSource configure({
     required bool enabled,
-    required LxSourceGrant grant,
     required Iterable<OnlineQuality> qualities,
   }) => LxStoredSource(
     id: id,
@@ -139,7 +111,6 @@ final class LxStoredSource {
     info: info,
     version: version + 1,
     enabled: enabled,
-    grant: grant,
     qualities: qualities,
   );
 
@@ -148,13 +119,11 @@ final class LxStoredSource {
     'digest': digest,
     'version': version,
     'enabled': enabled,
-    'api': grant.api.toList(),
-    'media': grant.media.toList(),
     'qualities': qualities.map((quality) => quality.lxValue).toList(),
   };
 }
 
-/// The manifest holds grants, where each entry references an immutable blob
+/// The manifest holds source settings; each entry references an immutable blob
 /// verified against its digest before the worker receives any script bytes.
 final class LxSourceStore {
   LxSourceStore(this.directory);
@@ -170,7 +139,7 @@ final class LxSourceStore {
     final value = jsonDecode(
       utf8.decode(await _boundedRead(manifest, 64 * 1024)),
     );
-    if (value is! Map || value['schema'] != 1) {
+    if (value is! Map || !const {1, 2}.contains(value['schema'])) {
       throw const FormatException('LX catalog');
     }
     final entries = value['sources'];
@@ -193,10 +162,8 @@ final class LxSourceStore {
       try {
         final digest = entry['digest'] as String;
         final script = await _readDocument(root, digest);
-        final grant = LxSourceGrant(
-          api: (entry['api'] as List).cast<String>(),
-          media: (entry['media'] as List).cast<String>(),
-        );
+        // Legacy domain lists are intentionally ignored. Network destinations
+        // are checked by the host on demand; no user-maintained list is needed.
         final declared = entry['qualities'] as List;
         final qualities = OnlineQuality.values
             .where((q) => declared.contains(q.lxValue))
@@ -208,12 +175,11 @@ final class LxSourceStore {
             info: script.info,
             version: entry['version'] as int,
             enabled: entry['enabled'] == true && qualities.isNotEmpty,
-            grant: grant,
             qualities: qualities,
           ),
         );
       } catch (_) {
-        // A lost or modified script cannot inherit the persisted grant.
+        // A lost or modified script cannot inherit the enabled source entry.
       }
     }
     return List.unmodifiable(sources);
@@ -248,7 +214,7 @@ final class LxSourceStore {
       _member(root, 'sources.json'),
       utf8.encode(
         jsonEncode({
-          'schema': 1,
+          'schema': 2,
           'sources': sources.map((source) => source.toJson()).toList(),
         }),
       ),

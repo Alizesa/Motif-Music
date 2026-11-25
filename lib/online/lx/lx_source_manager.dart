@@ -28,7 +28,6 @@ typedef LxFetch = Future<Map<String, Object?>> Function(
 );
 typedef LxOpen = Future<ControlledPcmInput> Function(
   Uri,
-  Set<String>,
   PcmCancellation,
   PcmCancellation,
 );
@@ -80,55 +79,51 @@ final class LxSourceManager extends ChangeNotifier {
     }
   }
 
-  Future<bool> import(Uint8List bytes, {String? replaceId}) => _change(
-    () async {
-      final document = LxScriptDocument.parse(bytes);
-      final previous = replaceId == null ? null : _byId(replaceId);
-      if (_sources.any((item) => item.digest == document.digest)) {
-        throw const _SourceChangeError('已导入相同内容的脚本。');
-      }
-      if (previous == null && _sources.length >= lxSourceCountLimit) {
-        throw const _SourceChangeError('音源数量已达上限。');
-      }
-      // For an enabled source, verify the new content before touching the old
-      // registration. A valid replacement always starts disabled with no grant.
-      if (previous?.enabled == true) await _capabilities(document);
-      _closing.check();
-      final source = LxStoredSource.newScript(document, previous);
-      await store.import(document);
-      try {
-        await _save([
-          for (final item in _sources)
-            if (item.id == replaceId) source else item,
-          if (previous == null) source,
-        ], revoke: previous);
-      } catch (_) {
-        await _discard(document.digest);
-        rethrow;
-      }
-      if (previous != null) await _discard(previous.digest);
-    },
-  );
+  Future<bool> import(Uint8List bytes, {String? replaceId}) =>
+      _change(() async {
+        final document = LxScriptDocument.parse(bytes);
+        final previous = replaceId == null ? null : _byId(replaceId);
+        if (_sources.any((item) => item.digest == document.digest)) {
+          throw const _SourceChangeError('已导入相同内容的脚本。');
+        }
+        if (previous == null && _sources.length >= lxSourceCountLimit) {
+          throw const _SourceChangeError('音源数量已达上限。');
+        }
+        // Import is the user's action to use this version. Validate without
+        // networking before changing any existing source or playback lease.
+        final capabilities = await _capabilities(document);
+        _closing.check();
+        final source = LxStoredSource.newScript(
+          document,
+          capabilities.qualities,
+          previous,
+        );
+        await store.import(document);
+        try {
+          await _save([
+            for (final item in _sources)
+              if (item.id == replaceId) source else item,
+            if (previous == null) source,
+          ], revoke: previous);
+        } catch (_) {
+          await _discard(document.digest);
+          rethrow;
+        }
+        if (previous != null) await _discard(previous.digest);
+      });
 
-  Future<bool> configure(
-    String id, {
-    required LxSourceGrant grant,
-    required bool enable,
-  }) => _change(() async {
-    final current = _byId(id);
-    var qualities = current.qualities;
-    if (enable && !current.enabled) {
-      final document = await store.read(current);
-      final capabilities = await _capabilities(document);
-      qualities = capabilities.qualities;
-    }
-    final next = current.configure(
-      enabled: enable,
-      grant: grant,
-      qualities: qualities,
-    );
-    await _save(_replace(next), revoke: current);
-  });
+  Future<bool> configure(String id, {required bool enable}) =>
+      _change(() async {
+        final current = _byId(id);
+        var qualities = current.qualities;
+        if (enable && !current.enabled) {
+          final document = await store.read(current);
+          final capabilities = await _capabilities(document);
+          qualities = capabilities.qualities;
+        }
+        final next = current.configure(enabled: enable, qualities: qualities);
+        await _save(_replace(next), revoke: current);
+      });
 
   Future<bool> remove(String id) => _change(() async {
     final current = _byId(id);
@@ -143,7 +138,7 @@ final class LxSourceManager extends ChangeNotifier {
     try {
       await store.discardBlob(digest);
     } on FileSystemException {
-      // The independent grants manifest no longer references these bytes.
+      // The source catalog no longer references these bytes.
     }
   }
 
@@ -187,7 +182,7 @@ final class LxSourceManager extends ChangeNotifier {
       _error = error.message;
       return false;
     } on FormatException {
-      _error = '脚本或授权格式有误。';
+      _error = '脚本格式有误。';
       return false;
     } catch (_) {
       _error = '无法更新音源，请重试。';
@@ -248,24 +243,13 @@ final class LxSourceManager extends ChangeNotifier {
 
 Future<ControlledPcmInput> _openWave(
   Uri uri,
-  Set<String> hosts,
   PcmCancellation owner,
   PcmCancellation request,
-) => FixtureWave.openManaged(LxMediaTransport(uri, hosts, owner), request);
+) => FixtureWave.openManaged(LxMediaTransport(uri, owner), request);
 
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
   final String message;
-}
-
-final class LxHostPermissionError extends OnlineException {
-  const LxHostPermissionError(this.host, {required this.media})
-    : super(OnlineErrorKind.rejected);
-  final String host;
-  final bool media;
-
-  @override
-  String toString() => '${media ? "媒体" : "API"}域名 $host 未获授权，可在音源管理中修改。';
 }
 
 final class _ManagedLxSource implements CancellablePlaybackSource {
@@ -305,7 +289,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
       work.check();
       final script = await store.read(source);
       work.check();
-      final broker = _LxRequestBudget(source.grant.api, fetch);
+      final broker = _LxRequestBudget(fetch);
       final result = await run(
         script.bytes,
         info: script.info,
@@ -334,11 +318,8 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
           _ => OnlineErrorKind.operationRejected,
         });
       }
-      if (!source.grant.media.contains(uri.host)) {
-        throw LxHostPermissionError(uri.host, media: true);
-      }
       final input = await work.until(
-        open(uri, source.grant.media, owner, work),
+        open(uri, owner, work),
         discard: (late) => late.close(),
       );
       handedOff = true;
@@ -382,10 +363,10 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
 }
 
 final class _LxRequestBudget {
-  _LxRequestBudget(this.hosts, this.fetch);
-  final Set<String> hosts;
+  _LxRequestBudget(this.fetch);
   final LxFetch fetch;
-  bool admitted = false;
+  int _requests = 0;
+  bool get admitted => _requests > 0;
   bool transmissionFailed = false;
   OnlineException? denied;
   OnlineException? terminal;
@@ -396,22 +377,15 @@ final class _LxRequestBudget {
   ) async {
     const refused = {'error': 'denied'};
     cancellation.check();
-    if (admitted || terminal != null) return refused;
+    if (_requests >= 4 || terminal != null) return refused;
     final uri = checkedLxUrl(message['url']);
     if (uri == null) {
       denied ??= const OnlineException(OnlineErrorKind.rejected);
       return refused;
     }
-    if (!hosts.contains(uri.host)) {
-      denied ??= LxHostPermissionError(uri.host, media: false);
-      if (denied is! LxHostPermissionError) {
-        denied = LxHostPermissionError(uri.host, media: false);
-      }
-      return refused;
-    }
     try {
-      final request = LxApiRequest.parse(message, hosts);
-      admitted = true;
+      final request = LxApiRequest.parse(message);
+      _requests++;
       final result = {'response': await fetch(request, cancellation)};
       if (utf8.encode(jsonEncode(result)).length > lxMessageLimit) {
         terminal = const OnlineException(OnlineErrorKind.malformedResponse);
@@ -421,7 +395,11 @@ final class _LxRequestBudget {
     } on PcmCancelled {
       rethrow;
     } on OnlineException catch (error) {
-      terminal = error;
+      if (error.kind == OnlineErrorKind.transport) {
+        transmissionFailed = true;
+      } else {
+        terminal = error;
+      }
       return refused;
     } on IOException {
       transmissionFailed = true;

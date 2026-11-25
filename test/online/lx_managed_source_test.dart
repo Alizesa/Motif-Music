@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/audio_engine.dart';
@@ -12,6 +13,7 @@ import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/domain/playback_source.dart';
 import 'package:motif/online/lx/lx_network.dart';
+import 'package:motif/online/lx/fixture/lx_fixture_wave.dart';
 import 'package:motif/online/lx/lx_source_manager.dart';
 import 'package:motif/online/lx/lx_source_store.dart';
 import 'package:motif/online/qq/qq_track.dart';
@@ -50,6 +52,8 @@ void main() {
   late Completer<void>? paused;
   late Completer<void> started;
   late QqTrack track;
+  late String mediaUrl;
+  late int requestAttempts;
 
   setUp(() async {
     root = await Directory.systemTemp.createTemp('motif-lx-managed-');
@@ -61,6 +65,8 @@ void main() {
     initialized = 0;
     handled = 0;
     blocked = false;
+    mediaUrl = 'https://$_media/track.wav';
+    requestAttempts = 1;
     paused = null;
     started = Completer<void>();
     track = QqTrack(
@@ -114,15 +120,15 @@ void main() {
               'url': 'https://$_api/track',
               'options': <String, Object?>{},
             }, cancellation);
-            expect(
-              await onRequest({
-                'url': 'https://$_api/repeat',
+            for (var i = 1; i < requestAttempts; i++) {
+              final next = await onRequest({
+                'url': 'https://candidate$i.example.test/track',
                 'options': <String, Object?>{},
-              }, cancellation),
-              {'error': 'denied'},
-            );
+              }, cancellation);
+              expect(next.containsKey('response'), i < 4 && !blocked);
+            }
             return response.containsKey('response')
-                ? {'url': 'https://$_media/track.wav'}
+                ? {'url': mediaUrl}
                 : {'error': 'unavailable'};
           },
       fetch: (request, _) async {
@@ -133,8 +139,7 @@ void main() {
           'body': {'ok': true},
         };
       },
-      open: (uri, hosts, owner, _) async {
-        expect(hosts, {_media});
+      open: (uri, owner, _) async {
         expect(owner.cancelled, isFalse);
         opened.add(uri);
         return _Input();
@@ -148,20 +153,11 @@ void main() {
     await root.delete(recursive: true);
   });
 
-  Future<String> enable({String? media = _media}) async {
+  Future<String> enable() async {
     expect(await manager.import(utf8.encode(_script)), isTrue);
-    expect(initialized, 0);
     final saved = manager.sources.single;
-    expect(saved.enabled, isFalse);
-    expect(registry.contains(saved.id), isFalse);
-    expect(
-      await manager.configure(
-        saved.id,
-        grant: LxSourceGrant(api: [_api], media: [?media]),
-        enable: true,
-      ),
-      isTrue,
-    );
+    expect(saved.enabled, isTrue);
+    expect(registry.contains(saved.id), isTrue);
     expect(initialized, 1);
     expect(fetched, isEmpty);
     return saved.id;
@@ -192,14 +188,7 @@ void main() {
       expect(stream.uri.host, isEmpty);
       expect(stream.owner.cancelled, isFalse);
 
-      expect(
-        await manager.configure(
-          id,
-          grant: manager.sources.single.grant,
-          enable: false,
-        ),
-        isTrue,
-      );
+      expect(await manager.configure(id, enable: false), isTrue);
       expect(stream.owner.cancelled, isTrue);
       stream.input.close();
       expect((await store.load()).single.enabled, isFalse);
@@ -216,9 +205,10 @@ void main() {
   );
 
   test(
-    'unknown media host and API rate limits terminate without QQ fallback',
+    'unsafe media URLs and API rate limits terminate without QQ fallback',
     () async {
-      final id = await enable(media: null);
+      final id = await enable();
+      mediaUrl = 'https://127.0.0.1/track.wav';
       Future<OnlineStream> resolve() => registry.resolve(
         track,
         OnlineQuality.standard,
@@ -228,10 +218,10 @@ void main() {
       await expectLater(
         resolve(),
         throwsA(
-          isA<LxHostPermissionError>().having(
-            (error) => error.host,
-            'host',
-            _media,
+          isA<OnlineException>().having(
+            (error) => error.kind,
+            'kind',
+            OnlineErrorKind.rejected,
           ),
         ),
       );
@@ -253,46 +243,42 @@ void main() {
     },
   );
 
-  test(
-    'a failed replacement keeps the active grant and a valid change revokes it',
-    () async {
-      final id = await enable();
-      final stream = await registry.resolve(
-        track,
-        OnlineQuality.standard,
-        preferredSourceId: id,
-      ) as ControlledOnlineStream;
-      final original = manager.sources.single;
-      expect(
-        await manager.import(utf8.encode('$_script invalid;'), replaceId: id),
-        isFalse,
-      );
-      expect(registry.contains(id), isTrue);
-      expect(stream.owner.cancelled, isFalse);
-      expect(
-        await manager.import(utf8.encode('$_script // new'), replaceId: id),
-        isTrue,
-      );
-      expect(registry.contains(id), isFalse);
-      expect(stream.owner.cancelled, isTrue);
-      stream.input.close();
-      final saved = (await store.load()).single;
-      expect(saved.id, id);
-      expect(saved.digest, isNot(original.digest));
-      expect(saved.grant.api, isEmpty);
-      expect(saved.grant.media, isEmpty);
-      expect(saved.enabled, isFalse);
-      expect(await manager.remove(id), isTrue);
-      expect(await store.load(), isEmpty);
-      expect(
-        await root.list().where((file) => file.path.endsWith('.js')).isEmpty,
-        isTrue,
-      );
-    },
-  );
+  test('a failed replacement keeps playback and a valid replacement is ready immediately', () async {
+    final id = await enable();
+    final stream = await registry.resolve(
+      track,
+      OnlineQuality.standard,
+      preferredSourceId: id,
+    ) as ControlledOnlineStream;
+    final original = manager.sources.single;
+    expect(
+      await manager.import(utf8.encode('$_script invalid;'), replaceId: id),
+      isFalse,
+    );
+    expect(registry.contains(id), isTrue);
+    expect(stream.owner.cancelled, isFalse);
+    expect(
+      await manager.import(utf8.encode('$_script // new'), replaceId: id),
+      isTrue,
+    );
+    expect(registry.contains(id), isTrue);
+    expect(stream.owner.cancelled, isTrue);
+    stream.input.close();
+    final saved = (await store.load()).single;
+    expect(saved.id, id);
+    expect(saved.digest, isNot(original.digest));
+    expect(saved.qualities, isNotEmpty);
+    expect(saved.enabled, isTrue);
+    expect(await manager.remove(id), isTrue);
+    expect(await store.load(), isEmpty);
+    expect(
+      await root.list().where((file) => file.path.endsWith('.js')).isEmpty,
+      isTrue,
+    );
+  });
 
   test(
-    'superseded playback and a changed grant release in-flight requests',
+    'superseded playback and disabling a source release in-flight requests',
     () async {
       final id = await enable();
       final cancel = PcmCancellation();
@@ -326,10 +312,7 @@ void main() {
         ),
       );
       await started.future;
-      expect(
-        await manager.configure(id, grant: LxSourceGrant(), enable: true),
-        isTrue,
-      );
+      expect(await manager.configure(id, enable: false), isTrue);
       await revoked;
       paused!.complete();
       expect(initialized, 1);
@@ -391,53 +374,178 @@ void main() {
     expect(fetched, hasLength(1));
   });
 
-  test(
-    'host allowlist cannot be widened by an authority or request header',
-    () {
-      for (final raw in [
-        'https://user@$_api/t',
-        'http://$_api/t',
-        'https://$_api:444/t',
-        'https://127.0.0.1/t',
-        'https://$_api/t#secret',
-        'https://$_api\\other/t',
-      ]) {
-        expect(checkedLxUrl(raw), isNull);
-      }
-      for (final address in [
-        '127.0.0.1',
-        '172.16.0.1',
-        '::ffff:8.8.8.8',
-        'fc00::1',
-        '192.0.2.1',
-      ]) {
-        expect(isPublicLxAddress(InternetAddress(address)), isFalse);
-      }
-      expect(
-        () => LxApiRequest.parse(
-          {
-            'url': 'https://$_api/t',
-            'options': {
-              'headers': {'Authorization': 'fixture-only'},
-            },
-          },
-          {_api},
-        ),
-        throwsA(isA<OnlineException>()),
-      );
-      final form = LxApiRequest.parse(
-        {
-          'url': 'https://$_api/t',
-          'options': {
-            'method': 'post',
-            'form': {'title': 'a+b', 'empty': ''},
-          },
+  test('unsafe URLs and application credential headers are still rejected', () {
+    for (final raw in [
+      'https://user@$_api/t',
+      'http://$_api/t',
+      'https://$_api:444/t',
+      'https://127.0.0.1/t',
+      'https://$_api/t#secret',
+      'https://$_api\\other/t',
+    ]) {
+      expect(checkedLxUrl(raw), isNull);
+    }
+    for (final address in [
+      '127.0.0.1',
+      '172.16.0.1',
+      '::ffff:8.8.8.8',
+      'fc00::1',
+      '192.0.2.1',
+    ]) {
+      expect(isPublicLxAddress(InternetAddress(address)), isFalse);
+    }
+    expect(
+      () => LxApiRequest.parse({
+        'url': 'https://$_api/t',
+        'options': {
+          'headers': {'Authorization': 'fixture-only'},
         },
-        {_api},
+      }),
+      throwsA(isA<OnlineException>()),
+    );
+    final form = LxApiRequest.parse({
+      'url': 'https://$_api/t',
+      'options': {
+        'method': 'post',
+        'form': {'title': 'a+b', 'empty': ''},
+      },
+    });
+    expect(utf8.decode(form.body!), 'title=a%2Bb&empty=');
+  });
+
+  test('new API and media hosts work without a saved domain list, with a bounded budget', () async {
+    final id = await enable();
+    requestAttempts = 5;
+    mediaUrl = 'https://new-cdn.example.test/song.wav';
+    final stream = await registry.resolve(
+      track,
+      OnlineQuality.standard,
+      preferredSourceId: id,
+    ) as ControlledOnlineStream;
+    expect(fetched.map((uri) => uri.host), [
+      _api,
+      'candidate1.example.test',
+      'candidate2.example.test',
+      'candidate3.example.test',
+    ]);
+    expect(opened.single.host, 'new-cdn.example.test');
+    stream.input.close();
+  });
+
+  test('an invalid first import does not leave a disabled or half-installed source', () async {
+    expect(await manager.import(utf8.encode('$_script invalid;')), isFalse);
+    expect(manager.error, '脚本初始化失败。');
+    expect(manager.sources, isEmpty);
+    expect(await store.load(), isEmpty);
+    expect(fetched, isEmpty);
+  });
+
+  test(
+    'old catalogs load without domain approval and save the new source schema',
+    () async {
+      final id = await enable();
+      final old = manager.sources.single.toJson()
+        ..['api'] = ['no longer a domain list']
+        ..['media'] = [];
+      await File('${root.path}/sources.json').writeAsString(
+        jsonEncode({
+          'schema': 1,
+          'sources': [old],
+        }),
       );
-      expect(utf8.decode(form.body!), 'title=a%2Bb&empty=');
+      final loaded = await store.load();
+      expect(loaded.single.id, id);
+      expect(loaded.single.enabled, isTrue);
+      expect(loaded.single.qualities, isNotEmpty);
+      await store.save(loaded);
+      final saved = jsonDecode(
+        await File('${root.path}/sources.json').readAsString(),
+      ) as Map;
+      expect(saved['schema'], 2);
+      expect((saved['sources'] as List).single, isNot(contains('api')));
+      expect((saved['sources'] as List).single, isNot(contains('media')));
     },
   );
+
+  test(
+    'media redirects can move to a new public HTTPS host without user setup',
+    () async {
+      final calls = <Uri>[];
+      final readers = <_Read>[];
+      final owner = PcmCancellation();
+      final transport = LxMediaTransport(
+        Uri.https('audio.example.test', '/song'),
+        owner,
+        open: (uri, headers, scope) async {
+          scope.check();
+          calls.add(uri);
+          final reader = _Read();
+          readers.add(reader);
+          return FixtureRangeResponse(
+            status: calls.length == 1 ? 302 : 206,
+            headers: calls.length == 1
+                ? {
+                    'location': ['https://other-cdn.example.test/song'],
+                  }
+                : {},
+            body: reader,
+          );
+        },
+      );
+      final response = await transport.open(0, null, PcmCancellation());
+      expect(calls.map((uri) => uri.host), [
+        'audio.example.test',
+        'other-cdn.example.test',
+      ]);
+      expect(readers.first.closed, isTrue);
+      expect(response.status, 206);
+      response.body.close();
+      expect(readers.last.closed, isTrue);
+      owner.cancel();
+    },
+  );
+
+  test('automatic media destinations still reject unsafe redirects before opening them', () async {
+    for (final target in [
+      'https://127.0.0.1/song',
+      'http://public.example.test/song',
+      'https://user@other.example.test/song',
+      'file:///etc/passwd',
+    ]) {
+      final calls = <Uri>[];
+      final first = _Read();
+      final owner = PcmCancellation();
+      final transport = LxMediaTransport(
+        Uri.https('audio.example.test', '/song'),
+        owner,
+        open: (uri, _, _) async {
+          calls.add(uri);
+          return FixtureRangeResponse(
+            status: 302,
+            headers: {
+              'location': [target],
+            },
+            body: first,
+          );
+        },
+      );
+      await expectLater(
+        transport.open(0, null, PcmCancellation()),
+        throwsA(isA<OnlineException>()),
+      );
+      expect(calls, hasLength(1));
+      expect(first.closed, isTrue);
+      owner.cancel();
+    }
+  });
+}
+
+final class _Read implements ControlledPcmRead {
+  bool closed = false;
+  @override
+  Future<Uint8List> read(int maximum) async => Uint8List(0);
+  @override
+  void close() => closed = true;
 }
 
 final class _QqSource implements PlaybackUrlResolver {

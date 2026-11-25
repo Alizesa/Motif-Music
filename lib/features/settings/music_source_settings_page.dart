@@ -71,29 +71,12 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
     }
   }
 
-  Future<void> _configure(
-    LxSourceManager manager,
-    LxStoredSource source, {
-    required bool enable,
-  }) async {
-    final grant = await showDialog<LxSourceGrant>(
-      context: context,
-      builder: (_) => _GrantDialog(source: source, enable: enable),
-    );
-    if (!mounted || grant == null) return;
-    await manager.configure(
-      source.id,
-      grant: grant,
-      enable: enable || source.enabled,
-    );
-  }
-
   Future<void> _remove(LxSourceManager manager, LxStoredSource source) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('移除音源？'),
-        content: Text('将移除「${source.name}」及其域名授权。'),
+        content: Text('将移除「${source.name}」并停止其播放。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -121,6 +104,10 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
           label: const Text('导入音源'),
         ),
       ),
+      const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Text('导入后自动启用，可选择为优先或备用来源。'),
+      ),
       if (manager.busy || !manager.ready && manager.error == null)
         const LinearProgressIndicator(),
       for (final source in manager.sources)
@@ -144,32 +131,14 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
                 value: source.enabled,
                 onChanged: !canEdit
                     ? null
-                    : (enable) {
-                        if (enable) {
-                          unawaited(_configure(manager, source, enable: true));
-                        } else {
-                          unawaited(
-                            manager.configure(
-                              source.id,
-                              grant: source.grant,
-                              enable: false,
-                            ),
-                          );
-                        }
-                      },
+                    : (enable) => unawaited(
+                        manager.configure(source.id, enable: enable),
+                      ),
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Wrap(
                   children: [
-                    TextButton(
-                      onPressed: canEdit
-                          ? () => unawaited(
-                              _configure(manager, source, enable: false),
-                            )
-                          : null,
-                      child: const Text('域名授权'),
-                    ),
                     TextButton(
                       onPressed: canEdit
                           ? () => unawaited(_import(manager, source.id))
@@ -321,86 +290,5 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
         ),
       ),
     ),
-  );
-}
-
-class _GrantDialog extends StatefulWidget {
-  const _GrantDialog({required this.source, required this.enable});
-  final LxStoredSource source;
-  final bool enable;
-
-  @override
-  State<_GrantDialog> createState() => _GrantDialogState();
-}
-
-class _GrantDialogState extends State<_GrantDialog> {
-  late final _api = TextEditingController(
-    text: widget.source.grant.api.join('\n'),
-  );
-  late final _media = TextEditingController(
-    text: widget.source.grant.media.join('\n'),
-  );
-  String? _error;
-
-  @override
-  void dispose() {
-    _api.dispose();
-    _media.dispose();
-    super.dispose();
-  }
-
-  void _save() {
-    Iterable<String> split(String text) =>
-        text.split(RegExp(r'[\s,，]+')).where((part) => part.isNotEmpty);
-    try {
-      final grant = LxSourceGrant(
-        api: split(_api.text),
-        media: split(_media.text),
-      );
-      Navigator.pop(context, grant);
-    } on FormatException {
-      setState(() => _error = '请输入完整域名，每类最多 8 个。');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.enable ? '启用${widget.source.name}' : '域名授权'),
-    content: SizedBox(
-      width: 360,
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('填写允许此音源访问的域名，每行一个。留空表示不授权。'),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _api,
-              decoration: const InputDecoration(labelText: '取址 API 域名'),
-              minLines: 1,
-              maxLines: 3,
-              maxLength: 2048,
-              autocorrect: false,
-            ),
-            TextField(
-              controller: _media,
-              decoration: const InputDecoration(labelText: '媒体域名'),
-              minLines: 1,
-              maxLines: 3,
-              maxLength: 2048,
-              autocorrect: false,
-            ),
-            if (_error case final error?) Text(error),
-          ],
-        ),
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      TextButton(onPressed: _save, child: Text(widget.enable ? '授权并启用' : '保存')),
-    ],
   );
 }

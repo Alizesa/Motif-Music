@@ -58,7 +58,9 @@ void main() {
         );
         await lengthKnown.timeout(const Duration(seconds: 5));
         expect((await opening).currentTrack!.uri, identity);
-        final initial = player.state.file.path;
+        final initial = await player.stream.path
+            .firstWhere((path) => path.startsWith('mak-pcm:'))
+            .timeout(const Duration(seconds: 5));
         expect(initial, startsWith('mak-pcm:'));
         expect(initial, isNot(contains('https:')));
         expect(
@@ -81,8 +83,14 @@ void main() {
         final advanced = engine.position
             .firstWhere((position) => position >= const Duration(seconds: 7))
             .timeout(const Duration(seconds: 5));
+        final newSegment = player.stream.path
+            .firstWhere(
+              (path) => path.startsWith('mak-pcm:') && path != initial,
+            )
+            .timeout(const Duration(seconds: 5));
         await engine.seek(const Duration(seconds: 7));
         await advanced;
+        await newSegment;
         expect(transport.opens.last, (224044, '"test"'));
         expect(transport.readers.first.closed, isTrue);
         expect(player.state.file.path, isNot(initial));
