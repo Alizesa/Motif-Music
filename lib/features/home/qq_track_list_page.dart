@@ -20,12 +20,14 @@ class QqTrackListPage extends StatefulWidget {
     required this.api,
     required this.playback,
     this.playlist,
+    this.onDownload,
   });
   final String title;
   final QqTrackListKind kind;
   final QqAccountApi api;
   final OnlinePlaybackController playback;
   final QqPlaylist? playlist;
+  final void Function(QqTrack)? onDownload;
   @override
   State<QqTrackListPage> createState() => _QqTrackListPageState();
 }
@@ -198,6 +200,17 @@ class _QqTrackListPageState extends State<QqTrackListPage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                         onTap: () => _play(index),
+                        trailing: widget.onDownload == null
+                            ? null
+                            : IconButton(
+                                tooltip: '下载',
+                                icon: const Icon(Icons.download_outlined),
+                                onPressed: () {
+                                  if (widget.api.sessions.isCurrent(_session)) {
+                                    widget.onDownload!(track);
+                                  }
+                                },
+                              ),
                       );
                     },
                   ),

@@ -9,10 +9,16 @@ import '../../online/qq/qq_track.dart' show QqTrack;
 import '../player/catalog_player_widgets.dart';
 
 class QqSearchPage extends StatefulWidget {
-  const QqSearchPage({super.key, required this.client, required this.playback});
+  const QqSearchPage({
+    super.key,
+    required this.client,
+    required this.playback,
+    this.onDownload,
+  });
 
   final QqMusicClient client;
   final OnlinePlaybackController playback;
+  final void Function(QqTrack)? onDownload;
 
   @override
   State<QqSearchPage> createState() => _QqSearchPageState();
@@ -211,21 +217,28 @@ class _QqSearchPageState extends State<QqSearchPage> {
                                     onSelected: (action) {
                                       if (action == 'queue') {
                                         _addToQueue(track);
+                                      } else if (action == 'download') {
+                                        widget.onDownload?.call(track);
                                       } else {
                                         unawaited(
                                           widget.playback.playQueue([track]),
                                         );
                                       }
                                     },
-                                    itemBuilder: (_) => const [
-                                      PopupMenuItem(
+                                    itemBuilder: (_) => [
+                                      const PopupMenuItem(
                                         value: 'play',
                                         child: Text('播放'),
                                       ),
-                                      PopupMenuItem(
+                                      const PopupMenuItem(
                                         value: 'queue',
                                         child: Text('加入队列'),
                                       ),
+                                      if (widget.onDownload != null)
+                                        const PopupMenuItem(
+                                          value: 'download',
+                                          child: Text('下载'),
+                                        ),
                                     ],
                                   ),
                                 ],

@@ -7,12 +7,14 @@ import 'package:flutter/foundation.dart';
 import '../../audio/controlled_pcm.dart';
 import '../../audio/controlled_encoded.dart';
 import '../domain/music_source_registry.dart';
+import '../domain/download_source.dart';
 import '../domain/online_error.dart';
 import '../domain/playback_source.dart';
 import '../qq/qq_track.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_native_worker.dart';
 import 'lx_audio_media.dart';
+import 'lx_download.dart';
 import 'lx_network.dart';
 import 'lx_request_error.dart';
 import 'lx_playback_source.dart';
@@ -35,6 +37,13 @@ typedef LxOpen = Future<ControlledAudioInput> Function(
   PcmCancellation,
 );
 
+typedef LxDownload = Future<String> Function(
+  Uri,
+  PcmCancellation,
+  DownloadWrite,
+  void Function(int),
+);
+
 final class LxSourceManager extends ChangeNotifier {
   LxSourceManager({
     required this.store,
@@ -42,15 +51,18 @@ final class LxSourceManager extends ChangeNotifier {
     LxRun? run,
     LxFetch? fetch,
     LxOpen? open,
+    LxDownload? download,
   }) : _run = run ?? const LxNativeWorker().run,
        _fetch = fetch ?? const LxHttpsTransport().api,
-       _open = open ?? _openAudio;
+       _open = open ?? _openAudio,
+       _download = download ?? _downloadAudio;
 
   final LxSourceStore store;
   final MusicSourceRegistry registry;
   final LxRun _run;
   final LxFetch _fetch;
   final LxOpen _open;
+  final LxDownload _download;
   final _closing = PcmCancellation();
   Future<void>? _initializing;
   List<LxStoredSource> _sources = const [];
@@ -226,7 +238,7 @@ final class LxSourceManager extends ChangeNotifier {
   void _register(LxStoredSource source) => registry.registerManaged(
     MusicSourceRegistration(
       name: source.name,
-      resolver: _ManagedLxSource(source, store, _run, _fetch, _open),
+      resolver: _ManagedLxSource(source, store, _run, _fetch, _open, _download),
     ),
   );
 
@@ -250,24 +262,115 @@ Future<ControlledAudioInput> _openAudio(
   PcmCancellation request,
 ) => openLxAudio(LxMediaTransport(uri, owner), request);
 
+Future<String> _downloadAudio(
+  Uri uri,
+  PcmCancellation work,
+  DownloadWrite write,
+  void Function(int) onTotal,
+) => downloadLxAudio(LxMediaTransport(uri, work), work, write, onTotal);
+
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
   final String message;
 }
 
-final class _ManagedLxSource implements CancellablePlaybackSource {
-  _ManagedLxSource(this.source, this.store, this.run, this.fetch, this.open);
+final class _ManagedLxSource
+    implements CancellablePlaybackSource, TrackDownloadSource {
+  _ManagedLxSource(
+    this.source,
+    this.store,
+    this.run,
+    this.fetch,
+    this.open,
+    this.download,
+  );
 
   final LxStoredSource source;
   final LxSourceStore store;
   final LxRun run;
   final LxFetch fetch;
   final LxOpen open;
+  final LxDownload download;
   final _lifetime = PcmCancellation();
   static int _nextIdentity = 0;
 
   @override
   String get sourceId => source.id;
+
+  @override
+  Set<OnlineQuality> get downloadQualities => source.qualities;
+
+  Future<Uri> _address(
+    QqTrack track,
+    OnlineQuality quality,
+    PcmCancellation work,
+  ) async {
+    if (!source.qualities.contains(quality)) {
+      throw const OnlineException(OnlineErrorKind.unsupportedQuality);
+    }
+    work.check();
+    final script = await store.read(source);
+    work.check();
+    final broker = _LxRequestBudget(fetch);
+    final result = await run(
+      script.bytes,
+      info: script.info,
+      event: {
+        'source': 'tx',
+        'action': 'musicUrl',
+        'info': {'type': quality.lxValue, 'musicInfo': lxQqMusicInfo(track)},
+      },
+      onRequest: broker.request,
+      cancellation: work,
+    );
+    work.check();
+    if (broker.terminal != null) throw broker.terminal!;
+    final uri = checkedLxUrl(result['url']);
+    if (uri != null) return uri;
+    if (result.containsKey('url')) {
+      throw const LxRequestException(LxRequestFailure.mediaAddress);
+    }
+    if (!broker.admitted && broker.denied != null) throw broker.denied!;
+    if (broker.transmissionFailed || result['error'] == 'timeout') {
+      throw broker.lastTransportFailure ??
+          const LxRequestException(LxRequestFailure.scriptTimeout);
+    }
+    throw OnlineException(switch (result['error']) {
+      'unsupported' => OnlineErrorKind.unsupported,
+      'unavailable' => OnlineErrorKind.unavailable,
+      _ => OnlineErrorKind.operationRejected,
+    });
+  }
+
+  @override
+  Future<String> transfer(
+    QqTrack track,
+    OnlineQuality quality, {
+    required PcmCancellation cancellation,
+    required DownloadWrite write,
+    required void Function(int) onTotal,
+  }) async {
+    final work = PcmCancellation();
+    final release = _lifetime.listen(work.cancel);
+    final detach = cancellation.listen(work.cancel);
+    try {
+      final uri = await work.until(_address(track, quality, work));
+      return await download(uri, work, write, onTotal);
+    } on PcmCancelled {
+      if (cancellation.cancelled) rethrow;
+      throw const OnlineException(OnlineErrorKind.closed);
+    } on FixtureMediaException catch (error) {
+      throw OnlineException(
+        error.kind == FixtureMediaFailure.format
+            ? OnlineErrorKind.unsupportedFormat
+            : OnlineErrorKind.transport,
+      );
+    } finally {
+      work.cancel();
+      release();
+      detach();
+    }
+  }
 
   @override
   Future<OnlineStream> resolve(QqTrack track, OnlineQuality quality) =>
@@ -290,38 +393,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
     var handedOff = false;
     try {
       work.check();
-      final script = await store.read(source);
-      work.check();
-      final broker = _LxRequestBudget(fetch);
-      final result = await run(
-        script.bytes,
-        info: script.info,
-        event: {
-          'source': 'tx',
-          'action': 'musicUrl',
-          'info': {'type': quality.lxValue, 'musicInfo': lxQqMusicInfo(track)},
-        },
-        onRequest: broker.request,
-        cancellation: work,
-      );
-      work.check();
-      if (broker.terminal != null) throw broker.terminal!;
-      final uri = checkedLxUrl(result['url']);
-      if (uri == null) {
-        if (result.containsKey('url')) {
-          throw const LxRequestException(LxRequestFailure.mediaAddress);
-        }
-        if (!broker.admitted && broker.denied != null) throw broker.denied!;
-        if (broker.transmissionFailed || result['error'] == 'timeout') {
-          throw broker.lastTransportFailure ??
-              const LxRequestException(LxRequestFailure.scriptTimeout);
-        }
-        throw OnlineException(switch (result['error']) {
-          'unsupported' => OnlineErrorKind.unsupported,
-          'unavailable' => OnlineErrorKind.unavailable,
-          _ => OnlineErrorKind.operationRejected,
-        });
-      }
+      final uri = await _address(track, quality, work);
       final input = await work.until(
         open(uri, owner, work),
         discard: (late) => late.close(),

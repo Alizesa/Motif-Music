@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 
 import '../../online/application/online_playback_controller.dart';
+import '../../online/qq/qq_track.dart';
 import 'catalog_player_widgets.dart';
 
 class CatalogPlayerPage extends StatelessWidget {
@@ -10,16 +11,29 @@ class CatalogPlayerPage extends StatelessWidget {
     super.key,
     required this.playback,
     required this.onOpenSettings,
+    this.onDownload,
   });
 
   final OnlinePlaybackController playback;
   final VoidCallback onOpenSettings;
+  final void Function(QqTrack)? onDownload;
 
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
       title: const Text('正在播放'),
       actions: [
+        if (onDownload != null)
+          AnimatedBuilder(
+            animation: playback,
+            builder: (context, _) => IconButton(
+              tooltip: '下载',
+              onPressed: playback.currentTrack == null
+                  ? null
+                  : () => onDownload!(playback.currentTrack!),
+              icon: const Icon(Icons.download_outlined),
+            ),
+          ),
         IconButton(
           tooltip: '设置',
           onPressed: onOpenSettings,

@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../audio/audio_engine.dart';
+import '../../downloads/download_controller.dart';
+import '../../downloads/platform_download_destination.dart';
+import '../downloads/download_page.dart';
 import '../../audio/mpv_audio_engine.dart';
 import '../../library/application/library_controller.dart';
 import '../../library/domain/local_playback_matcher.dart';
@@ -65,9 +69,11 @@ class MotifHomePage extends StatefulWidget {
   State<MotifHomePage> createState() => _MotifHomePageState();
 }
 
-class _MotifHomePageState extends State<MotifHomePage> {
+class _MotifHomePageState extends State<MotifHomePage>
+    with WidgetsBindingObserver {
   late final AudioEngine _engine;
   late final MusicSourceRegistry _sources;
+  late final DownloadController _downloads;
   LxSourceManager? _lxSources;
   late final OnlinePlaybackSettingsController _settings;
   late final OnlinePlaybackController _playback;
@@ -83,6 +89,7 @@ class _MotifHomePageState extends State<MotifHomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _engine = widget.engineFactory?.call() ?? MpvAudioEngine();
     _sources = MusicSourceRegistry(
       qq: widget.qqMusic,
@@ -112,6 +119,10 @@ class _MotifHomePageState extends State<MotifHomePage> {
               );
             },
           ),
+    );
+    _downloads = DownloadController(
+      sources: _sources,
+      destination: const PlatformDownloadDestination(),
     );
     _playback = OnlinePlaybackController(
       engine: _engine,
@@ -147,13 +158,26 @@ class _MotifHomePageState extends State<MotifHomePage> {
   }
 
   @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    await _downloads.close();
+    return AppExitResponse.exit;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) unawaited(_downloads.close());
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _home?.removeListener(_homeChanged);
     _home?.dispose();
     unawaited(_sessionSubscription?.cancel() ?? Future.value());
     (widget.accountApi ?? widget.qqMusic.accountApi)?.verify = null;
     _playback.removeListener(_showPlaybackError);
     _playback.dispose();
+    _downloads.dispose();
     _settings.dispose();
     _lxSources?.dispose();
     _sources.close();
@@ -201,6 +225,7 @@ class _MotifHomePageState extends State<MotifHomePage> {
         api: api,
         playback: _playback,
         playlist: playlist,
+        onDownload: _download,
       ),
     );
   }
@@ -300,15 +325,39 @@ class _MotifHomePageState extends State<MotifHomePage> {
         ),
       );
 
-  Future<void> _openSearch() =>
-      _push(QqSearchPage(client: widget.qqMusic, playback: _playback));
+  Future<void> _openSearch() => _push(
+    QqSearchPage(
+      client: widget.qqMusic,
+      playback: _playback,
+      onDownload: _download,
+    ),
+  );
+
+  Future<void> _openDownloads() => _push(DownloadPage(controller: _downloads));
+
+  Future<void> _download(QqTrack track) async {
+    await _sources.loadManaged?.call();
+    if (!mounted) return;
+    final started = await showTrackDownloadSheet(
+      context,
+      controller: _downloads,
+      track: track,
+      preferredSourceId: _settings.value.preferredSourceId,
+      quality: _settings.value.quality,
+    );
+    if (started && mounted) await _openDownloads();
+  }
 
   Future<void> _openLibrary() => _push(
     LibraryPage(controller: widget.library, onPlay: _playback.playLocal),
   );
 
   Future<void> _openPlayer() => _push(
-    CatalogPlayerPage(playback: _playback, onOpenSettings: _openSettings),
+    CatalogPlayerPage(
+      playback: _playback,
+      onOpenSettings: _openSettings,
+      onDownload: _download,
+    ),
     showMiniPlayer: false,
   );
 
@@ -447,6 +496,7 @@ class _MotifHomePageState extends State<MotifHomePage> {
         onOpenLibrary: _openLibrary,
         onOpenPlayer: _openPlayer,
         onOpenSettings: _openSettings,
+        onOpenDownloads: _openDownloads,
         sessions: widget.sessions,
         onOpenAccount: _openAccount,
       ),

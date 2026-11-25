@@ -467,12 +467,14 @@ class MotifMyTab extends StatelessWidget {
     required this.onOpenLibrary,
     required this.onOpenPlayer,
     required this.onOpenSettings,
+    this.onOpenDownloads,
     this.sessions,
     this.onOpenAccount,
   });
   final VoidCallback onOpenLibrary;
   final VoidCallback onOpenPlayer;
   final VoidCallback onOpenSettings;
+  final VoidCallback? onOpenDownloads;
   final QqSessionManager? sessions;
   final VoidCallback? onOpenAccount;
   @override
@@ -520,6 +522,16 @@ class MotifMyTab extends StatelessWidget {
                       trailing: const Icon(Icons.chevron_right_rounded),
                       onTap: onOpenLibrary,
                     ),
+                    if (onOpenDownloads != null) ...[
+                      const Divider(height: 1),
+                      ListTile(
+                        key: const Key('my-downloads'),
+                        leading: const Icon(Icons.download_outlined),
+                        title: const Text('下载管理'),
+                        trailing: const Icon(Icons.chevron_right_rounded),
+                        onTap: onOpenDownloads,
+                      ),
+                    ],
                     const Divider(height: 1),
                     ListTile(
                       leading: const Icon(Icons.play_circle_outline_rounded),

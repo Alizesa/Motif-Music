@@ -64,6 +64,9 @@ void main() {
   var transientFailures = 0;
   var noResult = false;
   ControlledAudioInput? mediaInput;
+  late List<Uri> downloaded;
+  Completer<void>? downloadGate;
+  late Completer<void> downloadStarted;
 
   setUp(() async {
     root = await Directory.systemTemp.createTemp('motif-lx-managed-');
@@ -72,6 +75,9 @@ void main() {
     registry = MusicSourceRegistry(qq: qq);
     fetched = [];
     opened = [];
+    downloaded = [];
+    downloadGate = null;
+    downloadStarted = Completer<void>();
     initialized = 0;
     handled = 0;
     blocked = false;
@@ -182,6 +188,15 @@ void main() {
         opened.add(uri);
         return mediaInput ?? _Input();
       },
+      download: (uri, work, write, onTotal) async {
+        downloaded.add(uri);
+        downloadStarted.complete();
+        if (downloadGate != null) await work.until(downloadGate!.future);
+        work.check();
+        onTotal(4);
+        await write(Uint8List.fromList([1, 2, 3, 4]));
+        return 'mp3';
+      },
     );
   });
 
@@ -200,6 +215,54 @@ void main() {
     expect(fetched, isEmpty);
     return saved.id;
   }
+
+  test('managed download uses the same bounded QQ script resolution without opening playback', () async {
+    final id = await enable();
+    final bytes = BytesBuilder();
+    expect(
+      await registry.download(
+        id,
+        track,
+        OnlineQuality.standard,
+        cancellation: PcmCancellation(),
+        write: (chunk) async => bytes.add(chunk),
+        onTotal: (_) {},
+      ),
+      'mp3',
+    );
+    expect(bytes.takeBytes(), [1, 2, 3, 4]);
+    expect(downloaded, [Uri.parse(mediaUrl)]);
+    expect(fetched.length, 1);
+    expect(opened, isEmpty);
+    expect(qq.calls, 0);
+  });
+
+  test('disabling a source cancels an active download lease', () async {
+    final id = await enable();
+    downloadGate = Completer<void>();
+    final pending = registry.download(
+      id,
+      track,
+      OnlineQuality.standard,
+      cancellation: PcmCancellation(),
+      write: (_) async {},
+      onTotal: (_) {},
+    );
+    final result = expectLater(
+      pending,
+      throwsA(
+        isA<OnlineException>().having(
+          (error) => error.kind,
+          'kind',
+          OnlineErrorKind.closed,
+        ),
+      ),
+    );
+    await downloadStarted.future;
+    expect(await manager.configure(id, enable: false), isTrue);
+    await result;
+    expect(opened, isEmpty);
+  });
 
   test(
     'QQ success leaves the backup idle and a recoverable miss opens only PCM',

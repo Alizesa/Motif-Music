@@ -1,5 +1,6 @@
 import '../../audio/controlled_pcm.dart';
 import 'online_error.dart';
+import 'download_source.dart';
 import 'playback_source.dart';
 import '../qq/qq_track.dart';
 
@@ -34,6 +35,39 @@ class MusicSourceRegistry {
   List<MusicSourceRegistration> get sources =>
       List.unmodifiable([..._builtIn, ..._managed.values]);
   Future<void> Function()? loadManaged;
+  List<MusicSourceRegistration> get downloadSources => List.unmodifiable(
+    sources.where((source) => source.resolver is TrackDownloadSource),
+  );
+
+  Future<String> download(
+    String sourceId,
+    QqTrack track,
+    OnlineQuality quality, {
+    required PcmCancellation cancellation,
+    required DownloadWrite write,
+    required void Function(int) onTotal,
+  }) async {
+    _checkActive(null);
+    cancellation.check();
+    final source = downloadSources
+        .where((item) => item.id == sourceId)
+        .firstOrNull;
+    if (source == null) throw const OnlineException(OnlineErrorKind.closed);
+    final extension = await (source.resolver as TrackDownloadSource).transfer(
+      track,
+      quality,
+      cancellation: cancellation,
+      write: write,
+      onTotal: onTotal,
+    );
+    _checkActive(null);
+    cancellation.check();
+    if (!sources.any((item) => identical(item, source))) {
+      throw const OnlineException(OnlineErrorKind.closed);
+    }
+    return extension;
+  }
+
   bool _closed = false;
 
   bool contains(String id) => sources.any((source) => source.id == id);
