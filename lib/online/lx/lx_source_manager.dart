@@ -14,6 +14,7 @@ import 'fixture/lx_fixture_wave.dart';
 import 'lx_native_worker.dart';
 import 'lx_audio_media.dart';
 import 'lx_network.dart';
+import 'lx_request_error.dart';
 import 'lx_playback_source.dart';
 import 'lx_source_store.dart';
 
@@ -308,7 +309,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
       final uri = checkedLxUrl(result['url']);
       if (uri == null) {
         if (result.containsKey('url')) {
-          throw const OnlineException(OnlineErrorKind.rejected);
+          throw const LxRequestException(LxRequestFailure.mediaAddress);
         }
         if (!broker.admitted && broker.denied != null) throw broker.denied!;
         if (broker.transmissionFailed || result['error'] == 'timeout') {
@@ -355,6 +356,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
         FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.transport ||
         FixtureMediaFailure.truncated => OnlineErrorKind.transport,
+        FixtureMediaFailure.denied => OnlineErrorKind.rejected,
         _ => OnlineErrorKind.malformedResponse,
       });
     } on IOException {
@@ -391,11 +393,19 @@ final class _LxRequestBudget {
     if (_requests >= 4 || terminal != null) return refused;
     final uri = checkedLxUrl(message['url']);
     if (uri == null) {
-      denied ??= const OnlineException(OnlineErrorKind.rejected);
+      denied ??= const LxRequestException(LxRequestFailure.apiAddress);
       return refused;
     }
     try {
-      final request = LxApiRequest.parse(message);
+      final request = LxApiRequest.parse(
+        message,
+        onRedirect: () {
+          if (_requests >= 4) {
+            throw const LxRequestException(LxRequestFailure.budget);
+          }
+          _requests++;
+        },
+      );
       _requests++;
       final result = {'response': await fetch(request, cancellation)};
       if (utf8.encode(jsonEncode(result)).length > lxMessageLimit) {
@@ -406,7 +416,14 @@ final class _LxRequestBudget {
     } on PcmCancelled {
       rethrow;
     } on OnlineException catch (error) {
-      if (error.kind == OnlineErrorKind.transport) {
+      if (error is LxRequestException &&
+          const {
+            LxRequestFailure.headers,
+            LxRequestFailure.method,
+            LxRequestFailure.body,
+          }.contains(error.reason)) {
+        denied = error;
+      } else if (error.kind == OnlineErrorKind.transport) {
         transmissionFailed = true;
       } else {
         terminal = error;

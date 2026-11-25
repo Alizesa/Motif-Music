@@ -5,14 +5,27 @@ import 'dart:typed_data';
 
 import '../../audio/controlled_pcm.dart';
 import 'fixture/lx_fixture_wave.dart';
+import 'lx_request_error.dart';
 
 const lxWireTimeout = Duration(seconds: 3);
 typedef LxWireResponse = ({
   int status,
   String reason,
   Map<String, List<String>> headers,
-  LxSocketBody body,
+  LxWireBody body,
 });
+
+abstract interface class LxWireBody implements ControlledPcmRead {
+  Future<String> readLine(int limit);
+}
+
+typedef LxWireOpen = Future<LxWireResponse> Function(
+  Uri uri,
+  String method,
+  Map<String, String> headers,
+  Uint8List? payload,
+  PcmCancellation cancellation,
+);
 
 /// Opens one checked hop. Keep the raw TCP socket until TLS setup finishes so
 /// cancellation can also abandon a handshake that never responds.
@@ -30,15 +43,7 @@ Future<LxWireResponse> openLxHttps(
   try {
     stopping.check();
     final addresses = await stopping.until(InternetAddress.lookup(uri.host));
-    if (addresses.isEmpty ||
-        addresses.length > 32 ||
-        addresses.any((address) => !isPublicLxAddress(address))) {
-      throw const FixtureMediaException(FixtureMediaFailure.denied);
-    }
-    final approved = addresses.firstWhere(
-      (ip) => ip.type == InternetAddressType.IPv4,
-      orElse: () => addresses.first,
-    );
+    final approved = selectLxPublicAddress(addresses);
     stopping.check();
     final task = await stopping.until(
       RawSocket.startConnect(approved, 443),
@@ -65,7 +70,7 @@ Future<LxWireResponse> openLxHttps(
     final closeRaw = stopping.listen(() => unawaited(raw.close()));
     try {
       if (!_sameAddress(raw.remoteAddress, approved) || raw.remotePort != 443) {
-        throw const FixtureMediaException(FixtureMediaFailure.denied);
+        throw const LxRequestException(LxRequestFailure.privateAddress);
       }
       final host = uri.host;
       final secure = await stopping.until(
@@ -111,10 +116,27 @@ Future<LxWireResponse> openLxHttps(
     unlisten();
     cancellation.check();
     if (error is FixtureMediaException) rethrow;
+    if (error is LxRequestException) rethrow;
     throw const FixtureMediaException(FixtureMediaFailure.transport);
   } finally {
     budget.cancel();
   }
+}
+
+InternetAddress selectLxPublicAddress(List<InternetAddress> addresses) {
+  if (addresses.isEmpty || addresses.length > 32) {
+    throw const LxRequestException(LxRequestFailure.privateAddress);
+  }
+  final public = addresses.where(isPublicLxAddress).toList(growable: false);
+  if (public.isEmpty) {
+    throw const LxRequestException(LxRequestFailure.privateAddress);
+  }
+  // Pin one checked address. A special or unusable alternative must never be
+  // dialled, but must not hide an otherwise usable public DNS answer either.
+  return public.firstWhere(
+    (ip) => ip.type == InternetAddressType.IPv4,
+    orElse: () => public.first,
+  );
 }
 
 bool isPublicLxAddress(InternetAddress address) {
@@ -167,7 +189,7 @@ typedef _Headers = ({
 });
 
 // Read HTTP/1.1 headers and raw body bytes with backpressure.
-final class LxSocketBody implements ControlledPcmRead {
+final class LxSocketBody implements LxWireBody {
   LxSocketBody(this._socket, this._scope, this._unlisten)
     : _events = StreamIterator(_socket) {
     _removeCancel = _scope.listen(close);
@@ -257,6 +279,7 @@ final class LxSocketBody implements ControlledPcmRead {
     }
   }
 
+  @override
   Future<String> readLine(int limit) async {
     final line = <int>[];
     while (line.length < limit) {

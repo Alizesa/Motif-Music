@@ -21,6 +21,8 @@ R"LXJS(
   let requests = 0;
 
   function bufferFrom(value, encoding = 'utf8') {
+    if (value?.type === 'Buffer' && Array.isArray(value.data)) value = value.data;
+    if (ArrayBuffer.isView(value)) value = Array.from(value);
     if (Array.isArray(value)) {
       if (value.length > limit) throw new RangeError('Input too long');
       return new Uint8Array(value);
@@ -112,7 +114,12 @@ R"LXJS(
       }
       const entry = { url, options, callback, active: true, allowed: phase === 'play' };
       queued.push(entry);
-      return () => { entry.active = false; };
+      return () => {
+        entry.active = false;
+        entry.callback = undefined;
+        entry.options = undefined;
+        entry.url = undefined;
+      };
     },
   });
 
@@ -177,9 +184,23 @@ R"LXJS(
     if (pending) {
       if (!pending.answer) return 'P';
       const { callback, answer } = pending;
+      pending.callback = undefined;
+      pending.options = undefined;
+      pending.url = undefined;
       pending = undefined;
       if (answer.response) {
-        const resp = answer.response;
+        const wire = answer.response;
+        const resp = {statusCode: wire.statusCode, statusMessage: wire.statusMessage,
+          headers: wire.headers, body: wire.body};
+        if (typeof wire._rawBase64 === 'string') {
+          const raw = bufferFrom(wire._rawBase64, 'base64');
+          if (wire._binary) resp.body = parameters.env === 'mobile'
+            ? {type: 'Buffer', data: Array.from(raw)} : raw;
+          if (parameters.env === 'desktop') {
+            resp.raw = raw;
+            resp.bytes = raw.length;
+          }
+        }
         callback(null, resp, resp.body);
       } else {
         callback(new Error('LX request failed'), null, null);
@@ -190,11 +211,20 @@ R"LXJS(
       const entry = queued.shift();
       if (!entry.active) continue;
       if (!entry.allowed) {
-        entry.callback(new Error('LX request unavailable during initialization'), null, null);
+        const callback = entry.callback;
+        entry.callback = undefined;
+        entry.options = undefined;
+        entry.url = undefined;
+        callback(new Error('LX request unavailable during initialization'), null, null);
         return 'T';
       }
       pending = entry;
-      const body = stringify({ url: entry.url, options: entry.options });
+      const options = {...entry.options, _responseBytes: parameters.env === 'desktop',
+        _followRedirects: parameters.env === 'mobile'};
+      if (ArrayBuffer.isView(options.body)) {
+        options.body = {type: 'Buffer', data: Array.from(options.body)};
+      }
+      const body = stringify({ url: entry.url, options });
       return body.length < limit ? 'Q' + body : 'D{"error":"script"}';
     }
     return timers.size ? 'W' : 'D{"error":"init"}';

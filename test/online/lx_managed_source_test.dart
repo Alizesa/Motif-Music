@@ -57,6 +57,7 @@ void main() {
   late QqTrack track;
   late String mediaUrl;
   late int requestAttempts;
+  var unsupportedFirst = false;
   ControlledAudioInput? mediaInput;
 
   setUp(() async {
@@ -69,6 +70,7 @@ void main() {
     initialized = 0;
     handled = 0;
     blocked = false;
+    unsupportedFirst = false;
     mediaInput = null;
     mediaUrl = 'https://$_media/track.wav';
     requestAttempts = 1;
@@ -121,6 +123,17 @@ void main() {
               }, cancellation),
               {'error': 'denied'},
             );
+            if (unsupportedFirst) {
+              expect(
+                await onRequest({
+                  'url': 'https://$_api/first',
+                  'options': {
+                    'headers': {'Authorization': 'fixture-only'},
+                  },
+                }, cancellation),
+                {'error': 'denied'},
+              );
+            }
             final response = await onRequest({
               'url': 'https://$_api/track',
               'options': <String, Object?>{},
@@ -420,7 +433,7 @@ void main() {
   test('unsafe URLs and application credential headers are still rejected', () {
     for (final raw in [
       'https://user@$_api/t',
-      'http://$_api/t',
+      'http://$_api:81/t',
       'https://$_api:444/t',
       'https://127.0.0.1/t',
       'https://$_api/t#secret',
@@ -472,6 +485,19 @@ void main() {
       'candidate3.example.test',
     ]);
     expect(opened.single.host, 'new-cdn.example.test');
+    stream.input.close();
+  });
+
+  test('a callback for an unsupported first candidate does not block a compatible next request', () async {
+    final id = await enable();
+    unsupportedFirst = true;
+    final stream = await registry.resolve(
+      track,
+      OnlineQuality.standard,
+      preferredSourceId: id,
+    ) as ControlledOnlineStream;
+    expect(fetched, [Uri.parse('https://$_api/track')]);
+    expect(opened, hasLength(1));
     stream.input.close();
   });
 
@@ -551,7 +577,7 @@ void main() {
   test('automatic media destinations still reject unsafe redirects before opening them', () async {
     for (final target in [
       'https://127.0.0.1/song',
-      'http://public.example.test/song',
+      'http://public.example.test:81/song',
       'https://user@other.example.test/song',
       'file:///etc/passwd',
     ]) {

@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import '../../audio/controlled_pcm.dart';
 import '../domain/online_error.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_http_connection.dart';
+import 'lx_request_error.dart';
 
 export 'lx_http_connection.dart' show isPublicLxAddress;
 
@@ -32,7 +34,13 @@ Uri? checkedLxUrl(Object? raw) {
       RegExp(r'[\x00-\x20\x7f\\]').hasMatch(raw)) {
     return null;
   }
-  final uri = Uri.tryParse(raw);
+  var uri = Uri.tryParse(raw);
+  if (uri != null &&
+      uri.scheme == 'http' &&
+      uri.port == 80 &&
+      lxHost(uri.host) == uri.host) {
+    uri = uri.replace(scheme: 'https', port: 443);
+  }
   return uri != null &&
           uri.scheme == 'https' &&
           uri.port == 443 &&
@@ -43,6 +51,30 @@ Uri? checkedLxUrl(Object? raw) {
       : null;
 }
 
+String _checkedWebHeader(String value, {required bool origin}) {
+  if (origin && value == 'null') return value;
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      !const {'http', 'https'}.contains(uri.scheme) ||
+      uri.userInfo.isNotEmpty ||
+      lxHost(uri.host) != uri.host ||
+      uri.port != (uri.scheme == 'https' ? 443 : 80) ||
+      (origin &&
+          ((uri.path.isNotEmpty && uri.path != '/') ||
+              uri.hasQuery ||
+              uri.hasFragment))) {
+    throw const LxRequestException(LxRequestFailure.headers);
+  }
+  if (origin) return uri.origin;
+  return Uri(
+    scheme: uri.scheme,
+    host: uri.host,
+    port: uri.hasPort ? uri.port : null,
+    path: uri.path,
+    query: uri.hasQuery ? uri.query : null,
+  ).toString();
+}
+
 final class LxApiRequest {
   const LxApiRequest._(
     this.uri,
@@ -50,29 +82,41 @@ final class LxApiRequest {
     this.headers,
     this.body,
     this.timeout,
+    this.binary,
+    this.responseBytes,
+    this.followRedirects,
+    this.onRedirect,
   );
   final Uri uri;
   final String method;
   final Map<String, String> headers;
   final Uint8List? body;
   final Duration timeout;
+  final bool binary;
+  final bool responseBytes;
+  final bool followRedirects;
+  final void Function()? onRedirect;
 
-  static LxApiRequest parse(Map<String, Object?> message) {
+  static LxApiRequest parse(
+    Map<String, Object?> message, {
+    void Function()? onRedirect,
+  }) {
     final uri = checkedLxUrl(message['url']);
     if (uri == null) {
-      throw const OnlineException(OnlineErrorKind.rejected);
+      throw const LxRequestException(LxRequestFailure.apiAddress);
     }
     final options = message['options'];
     if (options is! Map) throw const FormatException('LX options');
     final verb = options['method'] ?? 'GET';
     if (verb is! String) throw const FormatException('LX method');
     final method = verb.toUpperCase();
-    if (!const {'GET', 'HEAD', 'POST'}.contains(method) ||
-        options['binary'] == true ||
-        options['formData'] != null) {
-      throw const OnlineException(OnlineErrorKind.unsupportedRequest);
+    if (!const {'GET', 'HEAD', 'POST'}.contains(method)) {
+      throw const LxRequestException(LxRequestFailure.method);
     }
-    final headers = <String, String>{};
+    final headers = <String, String>{
+      'accept': 'application/json',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36',
+    };
     final supplied = options['headers'];
     if (supplied != null && supplied is! Map) {
       throw const FormatException('LX headers');
@@ -81,44 +125,111 @@ final class LxApiRequest {
       final name = entry.key;
       final value = entry.value;
       if (name is! String ||
+          name.length > 64 ||
           (value is! String && value is! num) ||
-          headers.length >= 8 ||
-          !const {
-            'accept',
-            'accept-language',
-            'user-agent',
-            'content-type',
+          headers.length >= 16 ||
+          !RegExp(r"^[!#$%&'*+.^_`|~0-9a-zA-Z-]+$").hasMatch(name) ||
+          const {
+            'host',
+            'connection',
+            'content-length',
+            'transfer-encoding',
+            'trailer',
+            'upgrade',
+            'te',
+            'cookie',
+            'cookie2',
+            'set-cookie',
+            'authorization',
+            'proxy-authorization',
+            'accept-encoding',
+            'forwarded',
+            'x-forwarded-for',
+            'x-forwarded-host',
+            'x-real-ip',
           }.contains(name.toLowerCase()) ||
-          !RegExp(r'^[\x20-\x7e]{1,512}$').hasMatch(value.toString())) {
-        throw const OnlineException(OnlineErrorKind.rejected);
+          name.toLowerCase().startsWith('proxy-') ||
+          !RegExp(r'^[\x20-\x7e]{0,2048}$').hasMatch(value.toString())) {
+        throw const LxRequestException(LxRequestFailure.headers);
       }
-      headers[name.toLowerCase()] = value.toString();
+      final key = name.toLowerCase();
+      headers[key] = const {'origin', 'referer'}.contains(key)
+          ? _checkedWebHeader(value.toString(), origin: key == 'origin')
+          : value.toString();
+    }
+    if (headers.entries.fold<int>(
+          0,
+          (sum, entry) => sum + entry.key.length + entry.value.length,
+        ) >
+        8192) {
+      throw const LxRequestException(LxRequestFailure.headers);
     }
     Uint8List? body;
     final value = options['body'];
     final form = options['form'];
-    if (value != null || form != null) {
-      if (method != 'POST' || (value != null && form != null)) {
+    final multipart = options['formData'];
+    if (value != null || form != null || multipart != null) {
+      if (method != 'POST' ||
+          [value, form, multipart].where((part) => part != null).length > 1) {
         throw const FormatException('LX body');
       }
       if (form is Map) {
         final fields = <String>[];
         for (final entry in form.entries) {
           if (entry.key is! String ||
-              (entry.value is! String &&
+              (entry.value != null &&
+                  entry.value is! String &&
                   entry.value is! num &&
                   entry.value is! bool)) {
             throw const FormatException('LX form');
           }
           fields.add(
-            '${Uri.encodeQueryComponent(entry.key as String)}='
-            '${Uri.encodeQueryComponent(entry.value.toString())}',
+            '${Uri.encodeComponent(entry.key as String)}='
+            '${Uri.encodeComponent(entry.value?.toString() ?? 'null')}',
           );
         }
         headers['content-type'] = 'application/x-www-form-urlencoded';
         body = utf8.encode(fields.join('&'));
       } else if (form != null) {
         throw const FormatException('LX form');
+      } else if (multipart is Map && multipart.length <= 64) {
+        final random = Random.secure();
+        final boundary =
+            'motif-${List.generate(16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
+        final content = StringBuffer();
+        for (final entry in multipart.entries) {
+          final key = entry.key;
+          final field = entry.value;
+          if (key is! String ||
+              key.length > 128 ||
+              RegExp(r'[\x00-\x1f\x7f"\\]').hasMatch(key) ||
+              (field != null &&
+                  field is! String &&
+                  field is! num &&
+                  field is! bool)) {
+            throw const LxRequestException(LxRequestFailure.body);
+          }
+          content.write(
+            '--$boundary\r\nContent-Disposition: form-data; name="$key"\r\n\r\n${field?.toString() ?? 'null'}\r\n',
+          );
+          if (content.length > _apiBodyLimit) {
+            throw const FormatException('LX body size');
+          }
+        }
+        content.write('--$boundary--\r\n');
+        headers['content-type'] = 'multipart/form-data; boundary=$boundary';
+        body = utf8.encode(content.toString());
+      } else if (multipart != null) {
+        throw const LxRequestException(LxRequestFailure.body);
+      } else if (value is Map &&
+          value['type'] == 'Buffer' &&
+          value['data'] is List) {
+        final bytes = value['data'] as List;
+        if (bytes.length > _apiBodyLimit ||
+            bytes.any((byte) => byte is! int || byte < 0 || byte > 255)) {
+          throw const LxRequestException(LxRequestFailure.body);
+        }
+        body = Uint8List.fromList(bytes.cast<int>());
       } else if (value is String) {
         body = utf8.encode(value);
       } else {
@@ -137,13 +248,24 @@ final class LxApiRequest {
                 .round(),
           )
         : _transportBudget;
-    return LxApiRequest._(uri, method, headers, body, timeout);
+    return LxApiRequest._(
+      uri,
+      method,
+      headers,
+      body,
+      timeout,
+      options['binary'] == true,
+      options['_responseBytes'] == true,
+      options['_followRedirects'] != false,
+      onRedirect,
+    );
   }
 }
 
 /// Runs one host-checked public HTTPS exchange with a total deadline.
 final class LxHttpsTransport {
-  const LxHttpsTransport();
+  const LxHttpsTransport({LxWireOpen? open}) : _open = open ?? openLxHttps;
+  final LxWireOpen _open;
 
   Future<Map<String, Object?>> api(
     LxApiRequest request,
@@ -154,13 +276,53 @@ final class LxHttpsTransport {
     final deadline = Timer(request.timeout, scope.cancel);
     LxWireResponse? reply;
     try {
-      reply = await openLxHttps(
-        request.uri,
-        request.method,
-        request.headers,
-        request.body,
-        scope,
-      );
+      var uri = request.uri;
+      var method = request.method;
+      var headers = request.headers;
+      var body = request.body;
+      for (var redirects = 0; ; redirects++) {
+        reply = await _open(uri, method, headers, body, scope);
+        if (!request.followRedirects ||
+            !const {301, 302, 303, 307, 308}.contains(reply.status)) {
+          break;
+        }
+        final locations = reply.headers['location'];
+        if (locations == null || locations.length != 1 || redirects >= 3) {
+          throw const LxRequestException(LxRequestFailure.apiAddress);
+        }
+        final next = checkedLxUrl(uri.resolve(locations.single).toString());
+        if (next == null) {
+          throw const LxRequestException(LxRequestFailure.apiAddress);
+        }
+        final status = reply.status;
+        reply.body.close();
+        reply = null;
+        request.onRedirect?.call();
+        if ((status == 303 ||
+                ((status == 301 || status == 302) && method == 'POST')) &&
+            method != 'HEAD') {
+          method = 'GET';
+          body = null;
+          headers = Map.of(headers)..remove('content-type');
+        }
+        if (uri.host != next.host && body != null) {
+          throw const LxRequestException(LxRequestFailure.apiAddress);
+        }
+        if (uri.host != next.host) {
+          // Script keys are scoped to the explicitly requested origin.
+          headers = {
+            for (final entry in headers.entries)
+              if (const {
+                'accept',
+                'accept-language',
+                'user-agent',
+                'content-type',
+              }.contains(entry.key))
+                entry.key: entry.value,
+          };
+        }
+        uri = next;
+      }
       if (reply.status == 429) {
         throw const OnlineException(OnlineErrorKind.rateLimited);
       }
@@ -170,7 +332,12 @@ final class LxHttpsTransport {
               encodings.single.toLowerCase() != 'identity')) {
         throw const OnlineException(OnlineErrorKind.malformedResponse);
       }
-      final text = utf8.decode(await _readApiBody(reply, request.method));
+      final bytes = await _readApiBody(reply, method);
+      final raw = request.binary || request.responseBytes;
+      if (raw && bytes.length > (request.binary ? 32 * 1024 : 16 * 1024)) {
+        throw const OnlineException(OnlineErrorKind.malformedResponse);
+      }
+      final text = utf8.decode(bytes, allowMalformed: true);
       Object? value = text;
       try {
         value = jsonDecode(text);
@@ -182,27 +349,28 @@ final class LxHttpsTransport {
         'statusMessage': reply.reason,
         'headers': {
           for (final entry in reply.headers.entries)
-            if (const {
-              'content-type',
-              'content-length',
-              'location',
-              'etag',
-              'retry-after',
+            if (!const {
+              'set-cookie',
+              'set-cookie2',
+              'www-authenticate',
+              'proxy-authenticate',
             }.contains(entry.key))
               entry.key: entry.value.join(', '),
         },
-        'body': value,
+        'body': request.binary ? null : value,
+        if (raw) '_rawBase64': base64Encode(bytes),
+        if (request.binary) '_binary': true,
+        if (request.responseBytes) '_desktop': true,
       };
     } on PcmCancelled {
       cancellation.check();
       throw const OnlineException(OnlineErrorKind.transport);
     } on FixtureMediaException catch (error) {
       cancellation.check();
-      throw OnlineException(
-        error.kind == FixtureMediaFailure.denied
-            ? OnlineErrorKind.rejected
-            : OnlineErrorKind.transport,
-      );
+      if (error.kind == FixtureMediaFailure.denied) {
+        throw const LxRequestException(LxRequestFailure.privateAddress);
+      }
+      throw const OnlineException(OnlineErrorKind.transport);
     } finally {
       reply?.body.close();
       deadline.cancel();
@@ -301,9 +469,9 @@ final class LxMediaTransport implements FixtureRangeTransport {
     try {
       for (var hop = 0; hop <= 3; hop++) {
         scope.check();
-        if (checkedLxUrl(next.toString()) == null) {
-          throw const OnlineException(OnlineErrorKind.rejected);
-        }
+        next =
+            checkedLxUrl(next.toString()) ??
+            (throw const LxRequestException(LxRequestFailure.mediaAddress));
         final reply = await _open(next, {
           'accept':
               'audio/mpeg, audio/flac, audio/wav, application/octet-stream',
