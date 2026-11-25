@@ -58,6 +58,14 @@ final class FixtureWave implements ControlledPcmInput {
     if (address != lxFixtureWaveUrl) {
       throw const FixtureMediaException(FixtureMediaFailure.denied);
     }
+    return openManaged(transport, cancellation);
+  }
+
+  /// The transport owns the URL and checks the current grant on every open.
+  static Future<FixtureWave> openManaged(
+    FixtureRangeTransport transport,
+    PcmCancellation cancellation,
+  ) async {
     cancellation.check();
     final response = await cancellation.until(
       transport.open(0, null, cancellation),

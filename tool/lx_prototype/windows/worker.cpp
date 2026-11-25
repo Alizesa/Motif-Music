@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "runtime_fixture.h"
+#include "script_runtime.h"
 
 namespace {
 using namespace motif::lx_probe;
@@ -79,7 +80,68 @@ int ReadCatalog(void* opaque, int command) {
   return -1;
 }
 
-int Worker(wchar_t** argv) {
+bool ReadExact(HANDLE pipe, void* destination, DWORD size) {
+  auto* cursor = static_cast<char*>(destination);
+  while (size) {
+    DWORD received = 0;
+    if (!ReadFile(pipe, cursor, size, &received, nullptr) || !received) return false;
+    cursor += received;
+    size -= received;
+  }
+  return true;
+}
+
+std::string ReadFrame(HANDLE pipe, size_t maximum) {
+  DWORD size = 0;
+  if (!ReadExact(pipe, &size, sizeof(size)) || !size || size > maximum) return {};
+  std::string data(size, '\0');
+  return ReadExact(pipe, data.data(), size) ? data : std::string();
+}
+
+std::string ReadScript(HANDLE pipe) {
+  DWORD total = 0;
+  if (!ReadExact(pipe, &total, sizeof(total)) || !total || total > kLxScriptBytes) return {};
+  std::string script;
+  script.reserve(total);
+  while (script.size() < total) {
+    const auto remaining = total - script.size();
+    const auto part = ReadFrame(pipe, remaining < 32768 ? remaining : 32768);
+    if (part.empty()) return {};
+    script += part;
+  }
+  return script;
+}
+
+bool WriteExact(HANDLE pipe, const void* data, DWORD size) {
+  const auto* cursor = static_cast<const char*>(data);
+  while (size) {
+    DWORD sent = 0;
+    if (!WriteFile(pipe, cursor, size, &sent, nullptr) || !sent) return false;
+    cursor += sent;
+    size -= sent;
+  }
+  return true;
+}
+
+bool WriteFrame(HANDLE pipe, char type, std::string_view data) {
+  if (data.empty() || data.size() > kLxMessageBytes) return false;
+  const auto length = static_cast<DWORD>(data.size() + 1);
+  return WriteExact(pipe, &length, sizeof(length)) && WriteExact(pipe, &type, 1) &&
+         WriteExact(pipe, data.data(), static_cast<DWORD>(data.size()));
+}
+
+struct AppPipes {
+  HANDLE input;
+  HANDLE output;
+};
+
+std::string RelayScriptRequest(void* opaque, std::string_view message) {
+  const auto pipes = *static_cast<const AppPipes*>(opaque);
+  if (!WriteFrame(pipes.output, 'Q', message)) return {};
+  return ReadFrame(pipes.input, kLxMessageBytes);
+}
+
+int Worker(int argc, wchar_t** argv) {
   ProgressCell progress(ParseHandle(argv[6]));
   progress.Mark(1);
   worker_error = 83;
@@ -110,8 +172,22 @@ int Worker(wchar_t** argv) {
   progress.Mark(5);
   const std::wstring_view mode(argv[5]);
   Require(mode == L"stall" || mode == L"bounded" ||
-              mode == L"lx-fixed" || mode == L"lx-timeout", "invalid fixture mode");
+              mode == L"lx-fixed" || mode == L"lx-timeout" ||
+              mode == L"lx-script", "invalid fixture mode");
+  Require(argc == (mode == L"lx-script" ? 9 : 7), "invalid worker arguments");
   Require(SetEvent(ParseHandle(argv[4])), "report sandbox readiness");
+  if (mode == L"lx-script") {
+    const Handle input(ParseHandle(argv[7]));
+    const Handle output(ParseHandle(argv[8]));
+    if (GetFileType(input.value) != FILE_TYPE_PIPE ||
+        GetFileType(output.value) != FILE_TYPE_PIPE) return 91;
+    AppPipes pipes{input.value, output.value};
+    const auto parameters = ReadFrame(input.value, kLxMessageBytes);
+    const auto script = ReadScript(input.value);
+    if (parameters.empty() || script.empty()) return 91;
+    const auto result = RunLxScript(script, parameters, RelayScriptRequest, &pipes);
+    return WriteFrame(output.value, 'D', result) ? 0 : 91;
+  }
   if (mode == L"stall") {
     Sleep(INFINITE);
     return 80;
@@ -125,9 +201,9 @@ int Worker(wchar_t** argv) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-  if (argc != 7) return 81;
+  if (argc != 7 && argc != 9) return 81;
   try {
-    return Worker(argv);
+    return Worker(argc, argv);
   } catch (const std::exception&) {
     return worker_error;
   }

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'controlled_pcm.dart';
+
 @immutable
 class AudioTrack {
   const AudioTrack({
@@ -56,4 +58,17 @@ enum AudioQueueNavigation { next, previous }
 abstract interface class ApplicationQueueAudioEngine {
   Stream<AudioQueueNavigation> get navigationRequests;
   void useApplicationQueueNavigation(bool enabled);
+}
+
+/// The internal identity survives replacement of the PCM segment on seek.
+abstract interface class ControlledPcmAudioEngine {
+  Future<void> openControlledPcm(
+    ControlledPcmInput input, {
+    required String title,
+    String? artist,
+    String? album,
+    String? identity,
+    PcmCancellation? cancellation,
+    PcmCancellation? opening,
+  });
 }

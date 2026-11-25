@@ -2,7 +2,7 @@ name: LX isolation prototype
 
 on:
   push:
-    branches: ['test-*']
+    branches: [develop, 'test-*']
     paths:
       - 'tool/lx_prototype/**'
       - '.github/workflows/lx-prototype.yml'

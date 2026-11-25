@@ -8,7 +8,11 @@ import 'controlled_pcm.dart';
 /// libmpv-backed audio engine used by the current cross-platform prototype.
 /// Keep this adapter isolated so the native binding can be replaced if device
 /// validation shows platform-specific limitations.
-final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
+final class MpvAudioEngine
+    implements
+        AudioEngine,
+        ApplicationQueueAudioEngine,
+        ControlledPcmAudioEngine {
   MpvAudioEngine({PlayerApi? player})
     : _player =
           player ??
@@ -29,6 +33,7 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
   PcmCancellation? _pending;
   PcmCancellation? _controlledPending;
   _ControlledTrack? _controlled;
+  (_ControlledTrack, PcmCancellation)? _switchingSegment;
   bool _disposed = false;
   bool _applicationNavigation = false;
 
@@ -75,7 +80,12 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
   }, isBroadcast: true);
 
   @override
-  Stream<bool> get completed => _player.stream.completed;
+  Stream<bool> get completed => _player.stream.completed.where(
+    (value) => !value || !_switchingControlledSegment,
+  );
+
+  bool get _switchingControlledSegment =>
+      _controlled != null && identical(_controlled, _switchingSegment?.$1);
 
   @override
   Stream<AudioQueueNavigation> get navigationRequests => _player
@@ -97,24 +107,31 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
     _applicationNavigation = enabled;
   }
 
-  late final Stream<AudioQueueSnapshot> _queue = _player.stream.playlist.map(
-    (playlist) => AudioQueueSnapshot(
-      tracks: playlist.items
-          .map((media) {
-            final title = media.extras?['title'];
-            final artist = media.extras?['artist'];
-            final album = media.extras?['album'];
-            return AudioTrack(
-              uri: media.uri,
-              title: title is String && title.isNotEmpty ? title : media.uri,
-              artist: artist is String ? artist : null,
-              album: album is String ? album : null,
-            );
-          })
-          .toList(growable: false),
-      currentIndex: playlist.index,
-    ),
-  );
+  late final Stream<AudioQueueSnapshot> _queue = _player.stream.playlist
+      .where(
+        (playlist) => playlist.items.isNotEmpty || !_switchingControlledSegment,
+      )
+      .map(
+        (playlist) => AudioQueueSnapshot(
+          tracks: playlist.items
+              .map((media) {
+                final title = media.extras?['title'];
+                final artist = media.extras?['artist'];
+                final album = media.extras?['album'];
+                final identity = media.extras?['motifPcmIdentity'];
+                return AudioTrack(
+                  uri: identity is String ? identity : media.uri,
+                  title: title is String && title.isNotEmpty
+                      ? title
+                      : media.uri,
+                  artist: artist is String ? artist : null,
+                  album: album is String ? album : null,
+                );
+              })
+              .toList(growable: false),
+          currentIndex: playlist.index,
+        ),
+      );
 
   @override
   Stream<AudioQueueSnapshot> get queue => _queue;
@@ -187,16 +204,27 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
   }
 
   /// Takes ownership of one checked input. Only PCM samples enter libmpv.
+  @override
   Future<void> openControlledPcm(
     ControlledPcmInput input, {
     required String title,
+    String? artist,
+    String? album,
+    String? identity,
     PcmCancellation? cancellation,
+    PcmCancellation? opening,
   }) async {
     if (_disposed) {
       input.close();
       throw const PcmCancelled();
     }
-    final track = _ControlledTrack(input, title);
+    final track = _ControlledTrack(input, {
+      'title': title,
+      'artist': ?artist,
+      'album': ?album,
+      'motifPcmIdentity': ?identity,
+    });
+    final unlinkOpening = opening?.listen(track.cancellation.cancel);
     track.listenToOwner(cancellation, () {
       if (!identical(_controlled, track)) {
         track.closeInput();
@@ -219,6 +247,8 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
     } catch (_) {
       track.closeInput();
       rethrow;
+    } finally {
+      unlinkOpening?.call();
     }
   }
 
@@ -274,6 +304,7 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
         if (old != null) {
           final previous = old.segment;
           if (identical(old, track)) {
+            _switchingSegment = (track, operation);
             previous?.closeInput();
           } else {
             _takeControlled();
@@ -296,7 +327,7 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
           sink,
           candidate,
           operation,
-          sink.toMedia(extras: {'title': track.title}),
+          sink.toMedia(extras: track.extras),
         );
         _controlled = track;
         track.segment = next;
@@ -319,6 +350,7 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
         unawaited(_feed(track, next));
       });
     } finally {
+      if (identical(_switchingSegment?.$2, operation)) _switchingSegment = null;
       unlisten();
       _done(operation);
       if (identical(_controlledPending, operation)) _controlledPending = null;
@@ -518,10 +550,10 @@ final class MpvAudioEngine implements AudioEngine, ApplicationQueueAudioEngine {
 }
 
 final class _ControlledTrack {
-  _ControlledTrack(this.input, this.title);
+  _ControlledTrack(this.input, this.extras);
 
   final ControlledPcmInput input;
-  final String title;
+  final Map<String, String> extras;
   final cancellation = PcmCancellation();
   void Function()? _removeOwner;
   _PcmSegment? segment;

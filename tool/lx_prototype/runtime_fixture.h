@@ -2,7 +2,7 @@
 
 namespace motif::lx_probe {
 
-// The probe has no entry point that accepts external JavaScript.
+// These fixtures exercise the runtime using built-in JavaScript.
 enum class RuntimeResult : int {
   ok = 0,
   setup = 1,

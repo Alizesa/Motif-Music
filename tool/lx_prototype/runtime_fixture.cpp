@@ -1,4 +1,5 @@
 #include "runtime_fixture.h"
+#include "script_runtime.h"
 
 #include <chrono>
 #include <cstdint>
@@ -120,6 +121,63 @@ RuntimeResult CheckInterrupt() {
   return interrupted ? RuntimeResult::ok : RuntimeResult::interrupt;
 }
 
+struct ScriptExchange {
+  bool started = false;
+  bool cancelled = false;
+  bool invalid = false;
+};
+
+std::string SimulateScriptHost(void* opaque, std::string_view message) {
+  auto& exchange = *static_cast<ScriptExchange*>(opaque);
+  if (!exchange.started && message.starts_with("Q") &&
+      message.find("https://api.example.invalid/fixture") != std::string_view::npos) {
+    exchange.started = true;
+    return R"({"pending":true})";
+  }
+  if (exchange.started && !exchange.cancelled && message == "P") {
+    return R"({"pending":true})";
+  }
+  if (exchange.started && !exchange.cancelled && message == "X") {
+    exchange.cancelled = true;
+    return R"({"error":"cancelled"})";
+  }
+  exchange.invalid = true;
+  return {};
+}
+
+RuntimeResult CheckScriptContract() {
+  constexpr std::string_view script = R"JS(
+    const {request, send, on, EVENT_NAMES, utils} = globalThis.lx;
+    if (lx.version !== '2.0.0' || !lx.currentScriptInfo.rawScript.includes('fixture')) throw 1;
+    on(EVENT_NAMES.request, ({source, action, info}) => new Promise((resolve, reject) => {
+      if (source !== 'tx' || action !== 'musicUrl' || info.musicInfo.songmid !== 'fixture') {
+        return reject();
+      }
+      const cancel = request('https://api.example.invalid/fixture', {}, () => reject());
+      setTimeout(() => cancel(), 30);
+      setTimeout(() => {
+        if (utils.buffer.bufToString(utils.buffer.from('test'), 'base64') !== 'dGVzdA==') {
+          reject();
+        } else {
+          resolve('https://media.example.invalid/fixture.wav');
+        }
+      }, 60);
+    }));
+    send(EVENT_NAMES.inited, {
+      sources: {tx: {type: 'music', actions: ['musicUrl'], qualitys: ['128k']}},
+    });
+  )JS";
+  constexpr std::string_view parameters = R"({
+    "env":"mobile","info":{"name":"Fixture"},
+    "event":{"source":"tx","action":"musicUrl","info":{"type":"128k","musicInfo":{"songmid":"fixture"}}}
+  })";
+  ScriptExchange exchange;
+  const auto answer = RunLxScript(script, parameters, SimulateScriptHost, &exchange);
+  return exchange.started && exchange.cancelled && !exchange.invalid &&
+                 answer == R"({"url":"https://media.example.invalid/fixture.wav"})"
+      ? RuntimeResult::ok : RuntimeResult::globals_or_promise;
+}
+
 struct Catalog {
   FixtureCatalog query;
   void* opaque;
@@ -141,7 +199,7 @@ JSValue FixtureRequest(JSContext* ctx, JSValueConst, int argc,
 }  // namespace
 
 RuntimeResult RunRuntimeFixtures() {
-  for (const auto check : {CheckGlobalsAndPromise, CheckMemory, CheckInterrupt}) {
+  for (const auto check : {CheckGlobalsAndPromise, CheckMemory, CheckInterrupt, CheckScriptContract}) {
     const auto result = check();
     if (result != RuntimeResult::ok) return result;
   }

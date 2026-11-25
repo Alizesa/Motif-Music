@@ -10,7 +10,7 @@ if(MSVC)
 endif()
 
 # The app fixture build includes only the isolated runtime, with no media probe.
-option(MOTIF_LX_RUNTIME_ONLY "Build only the isolated script fixture" OFF)
+option(MOTIF_LX_RUNTIME_ONLY "Build only the isolated script runtime" OFF)
 include(FetchContent)
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
@@ -29,7 +29,7 @@ FetchContent_Declare(quickjs
 FetchContent_MakeAvailable(quickjs)
 add_subdirectory("${quickjs_SOURCE_DIR}" "${quickjs_BINARY_DIR}" EXCLUDE_FROM_ALL)
 
-add_library(lx_fixture STATIC runtime_fixture.cpp)
+add_library(lx_fixture STATIC runtime_fixture.cpp script_runtime.cpp)
 target_link_libraries(lx_fixture PRIVATE qjs)
 target_include_directories(lx_fixture PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 

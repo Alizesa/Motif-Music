@@ -58,7 +58,7 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 add_subdirectory("runner")
 
 if("$ENV{MOTIF_LX_APP_FIXTURE}" STREQUAL "true")
-  # The helper hosts only the fixed script and its isolated worker.
+  # Test builds package the LX controller and its isolated worker.
   set(MOTIF_LX_RUNTIME_ONLY ON)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../tool/lx_prototype"
     "${CMAKE_CURRENT_BINARY_DIR}/motif-lx-fixture")

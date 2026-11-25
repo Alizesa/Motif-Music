@@ -20,27 +20,27 @@ final class LxFixtureRuntime {
   const LxFixtureRuntime();
 
   static const _channel = MethodChannel('motif/lx_fixture');
-  static bool _running = false;
+  static Future<void> _tail = Future.value();
 
   bool get isAvailable =>
       lxAppFixtureEnabled && (Platform.isAndroid || Platform.isWindows);
 
-  Future<String> resolve(PcmCancellation cancellation) async {
-    if (!isAvailable) throw const LxFixtureRuntimeException('unavailable');
-    if (_running) throw const LxFixtureRuntimeException('busy');
-    _running = true;
-    try {
-      await _verify(cancellation, timeout: true, expected: 'MOTIF_LX_TIMEOUT');
-      await _verify(
-        cancellation,
-        timeout: false,
-        expected: 'MOTIF_LX_FIXED_WAVE',
-      );
-      return lxFixtureWaveUrl;
-    } finally {
-      _running = false;
-    }
+  static Future<T> exclusive<T>(Future<T> Function() action) {
+    final result = _tail.then((_) => action());
+    _tail = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
   }
+
+  Future<String> resolve(PcmCancellation cancellation) => exclusive(() async {
+    if (!isAvailable) throw const LxFixtureRuntimeException('unavailable');
+    await _verify(cancellation, timeout: true, expected: 'MOTIF_LX_TIMEOUT');
+    await _verify(
+      cancellation,
+      timeout: false,
+      expected: 'MOTIF_LX_FIXED_WAVE',
+    );
+    return lxFixtureWaveUrl;
+  });
 
   Future<void> _verify(
     PcmCancellation cancellation, {

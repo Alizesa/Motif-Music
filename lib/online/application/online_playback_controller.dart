@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../audio/audio_engine.dart';
+import '../../audio/controlled_pcm.dart';
 import '../../library/domain/library_models.dart';
 import '../../library/domain/library_playback_error.dart';
 import '../../settings/online_playback_settings_controller.dart';
 import '../domain/online_error.dart';
+import '../domain/playback_source.dart';
 import '../qq/qq_track.dart';
 import 'recommendation_queue.dart';
 import 'track_playback_resolver.dart';
@@ -73,6 +75,8 @@ class OnlinePlaybackController extends ChangeNotifier {
   QqTrack? _requested;
   AudioTrack? _external;
   String? _currentUri;
+  PcmCancellation? _intent;
+  void Function()? _watchControlled;
   AudioQueueSnapshot _nativeQueue = AudioQueueSnapshot.empty;
   bool _closed = false;
   bool _loading = false;
@@ -145,11 +149,15 @@ class OnlinePlaybackController extends ChangeNotifier {
   Future<bool> _load(QqTrack track, void Function() commitQueue) async {
     if (_closed) return false;
     final generation = ++_generation;
+    _intent?.cancel();
+    final intent = _intent = PcmCancellation();
     bool isCurrent() => !_closed && generation == _generation;
     _loading = true;
     _requested = track;
     _error = null;
     _notify();
+    ControlledOnlineStream? managed;
+    var ownedByEngine = false;
     try {
       await settings.initialize();
       if (!isCurrent()) return false;
@@ -162,23 +170,54 @@ class OnlinePlaybackController extends ChangeNotifier {
         fallbackSourceId: preferences.fallbackSourceId,
         confirm: confirmLocal,
         isCurrent: isCurrent,
+        cancellation: intent,
       );
+      if (resolved.stream case ControlledOnlineStream stream) managed = stream;
       if (!isCurrent()) return false;
       await _serializeEngine(() async {
         if (!isCurrent()) return;
-        await engine.openQueue([
-          AudioTrack(
-            uri: resolved.uri,
+        if (managed case final stream?) {
+          final player = engine;
+          if (player is! ControlledPcmAudioEngine) {
+            throw const OnlineException(OnlineErrorKind.unsupported);
+          }
+          final controlled = player as ControlledPcmAudioEngine;
+          stream.owner.check();
+          ownedByEngine = true;
+          await controlled.openControlledPcm(
+            stream.input,
             title: track.title,
             artist: track.artists.join('、'),
             album: track.album,
-          ),
-        ]);
+            identity: resolved.uri,
+            cancellation: stream.owner,
+            opening: intent,
+          );
+          stream.owner.check();
+        } else {
+          await engine.openQueue([
+            AudioTrack(
+              uri: resolved.uri,
+              title: track.title,
+              artist: track.artists.join('、'),
+              album: track.album,
+            ),
+          ]);
+        }
         if (!isCurrent()) return;
+        _stopWatchingControlled();
         commitQueue();
         _current = track;
         _external = null;
         _currentUri = resolved.uri;
+        if (managed case final stream?) {
+          _watchControlled = stream.owner.listen(() {
+            if (_currentUri != resolved.uri || _closed) return;
+            _completed = true;
+            _playing = false;
+            _notify();
+          });
+        }
         _position = Duration.zero;
         _completed = false;
       });
@@ -187,10 +226,14 @@ class OnlinePlaybackController extends ChangeNotifier {
       return true;
     } on PlaybackCancelled {
       return false;
+    } on PcmCancelled {
+      return false;
     } catch (error) {
       if (isCurrent()) _report(error);
       return false;
     } finally {
+      if (!ownedByEngine) managed?.input.close();
+      if (identical(_intent, intent)) _intent = null;
       if (isCurrent()) {
         _loading = false;
         _requested = null;
@@ -203,6 +246,7 @@ class OnlinePlaybackController extends ChangeNotifier {
   Future<void> playLocal(LocalAudioFile file) async {
     if (_closed) throw const PlaybackCancelled();
     final generation = ++_generation;
+    _intent?.cancel();
     continuation.stop();
     _loading = true;
     _error = null;
@@ -223,6 +267,7 @@ class OnlinePlaybackController extends ChangeNotifier {
           throw const PlaybackCancelled();
         }
         queue.clear();
+        _stopWatchingControlled();
         _current = null;
         _external = track;
         _currentUri = track.uri;
@@ -254,6 +299,8 @@ class OnlinePlaybackController extends ChangeNotifier {
   void releaseCatalogQueue() {
     if (_closed) return;
     _generation++;
+    _intent?.cancel();
+    _stopWatchingControlled();
     continuation.stop();
     queue.clear();
     if (_current != null && _currentUri != null) {
@@ -364,6 +411,8 @@ class OnlinePlaybackController extends ChangeNotifier {
     _nativeQueue = snapshot;
     if (!_loading && snapshot.currentTrack?.uri != _currentUri) {
       _generation++;
+      _intent?.cancel();
+      _stopWatchingControlled();
       continuation.stop();
       queue.clear();
       _current = null;
@@ -371,6 +420,11 @@ class OnlinePlaybackController extends ChangeNotifier {
       _currentUri = snapshot.currentTrack?.uri;
     }
     _notify();
+  }
+
+  void _stopWatchingControlled() {
+    _watchControlled?.call();
+    _watchControlled = null;
   }
 
   void _report(Object error) {
@@ -395,6 +449,8 @@ class OnlinePlaybackController extends ChangeNotifier {
       navigation.useApplicationQueueNavigation(false);
     }
     _generation++;
+    _intent?.cancel();
+    _stopWatchingControlled();
     continuation.stop();
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());

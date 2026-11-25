@@ -1,5 +1,6 @@
 package com.alizesa.motif
 
+import android.content.Intent
 import com.alizesa.motif.library.SafLibraryScanner
 import com.alizesa.motif.lx.LxFixtureBridge
 import io.flutter.embedding.android.FlutterActivity
@@ -25,5 +26,10 @@ class MainActivity : FlutterActivity() {
         lxFixture?.close()
         lxFixture = null
         super.onDestroy()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (lxFixture?.onActivityResult(requestCode, resultCode, data) == true) return
+        super.onActivityResult(requestCode, resultCode, data)
     }
 }

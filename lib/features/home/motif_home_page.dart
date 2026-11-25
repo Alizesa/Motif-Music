@@ -12,6 +12,9 @@ import '../../library/domain/local_playback_matcher.dart';
 import '../../online/application/online_playback_controller.dart';
 import '../../online/application/track_playback_resolver.dart';
 import '../../online/domain/music_source_registry.dart';
+import '../../online/lx/lx_native_worker.dart';
+import '../../online/lx/lx_source_manager.dart';
+import '../../online/lx/lx_source_store.dart';
 import '../../online/qq/qq_music_client.dart';
 import '../../online/qq/qq_track.dart' show QqTrack;
 import '../../settings/file_online_playback_preferences_store.dart';
@@ -65,6 +68,7 @@ class MotifHomePage extends StatefulWidget {
 class _MotifHomePageState extends State<MotifHomePage> {
   late final AudioEngine _engine;
   late final MusicSourceRegistry _sources;
+  LxSourceManager? _lxSources;
   late final OnlinePlaybackSettingsController _settings;
   late final OnlinePlaybackController _playback;
   int _selectedIndex = 0;
@@ -84,6 +88,20 @@ class _MotifHomePageState extends State<MotifHomePage> {
       qq: widget.qqMusic,
       thirdPartySources: widget.thirdPartySources,
     );
+    if (const LxNativeWorker().available &&
+        _engine is ControlledPcmAudioEngine) {
+      final manager = _lxSources = LxSourceManager(
+        registry: _sources,
+        store: LxSourceStore(() async {
+          final directory = await getApplicationSupportDirectory();
+          return Directory(
+            '${directory.path}${Platform.pathSeparator}lx-sources',
+          );
+        }),
+      );
+      _sources.loadManaged = manager.initialize;
+      unawaited(manager.initialize());
+    }
     _settings = OnlinePlaybackSettingsController(
       widget.preferencesStore ??
           FileOnlinePlaybackPreferencesStore(
@@ -137,6 +155,7 @@ class _MotifHomePageState extends State<MotifHomePage> {
     _playback.removeListener(_showPlaybackError);
     _playback.dispose();
     _settings.dispose();
+    _lxSources?.dispose();
     _sources.close();
     unawaited(_engine.dispose());
     super.dispose();
@@ -319,8 +338,13 @@ class _MotifHomePageState extends State<MotifHomePage> {
     ),
   );
 
-  Future<void> _openSourceSettings() =>
-      _push(MusicSourceSettingsPage(sources: _sources, settings: _settings));
+  Future<void> _openSourceSettings() => _push(
+    MusicSourceSettingsPage(
+      sources: _sources,
+      settings: _settings,
+      managed: _lxSources,
+    ),
+  );
 
   Future<LocalPlaybackChoice?> _confirmLocal(
     QqTrack track,

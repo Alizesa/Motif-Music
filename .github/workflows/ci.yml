@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       lx_fixture:
-        description: Include the fixed LX playback fixture in the test build
+        description: Include LX source management and the playback fixture
         type: boolean
         default: false
 
@@ -79,18 +79,18 @@ jobs:
         run: python3 tool/patch_android_webview.py
 
       - name: Prepare stable Android test signing
-        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-')
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-'))
         env:
           MOTIF_TEST_KEYSTORE_BASE64: ${{ secrets.MOTIF_TEST_KEYSTORE_BASE64 }}
         run: python3 tool/prepare_test_signing.py
 
       - name: Build release APK
         env:
-          MOTIF_LX_APP_FIXTURE: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture }}
-          MOTIF_REQUIRE_TEST_SIGNING: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') }}
-          MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
-          MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
-          MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/test-') && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
+          MOTIF_LX_APP_FIXTURE: ${{ github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture) }}
+          MOTIF_REQUIRE_TEST_SIGNING: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) }}
+          MOTIF_TEST_STORE_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) && secrets.MOTIF_TEST_STORE_PASSWORD || '' }}
+          MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
+          MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
         run: |
           args=(build apk --release --no-pub)
           if [[ "$MOTIF_LX_APP_FIXTURE" == "true" ]]; then
@@ -101,7 +101,7 @@ jobs:
       - name: Upload Android artifact
         uses: actions/upload-artifact@v7
         with:
-          name: motif-android-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture && '-lx-fixture' || '' }}
+          name: motif-android-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ (github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture)) && '-lx-fixture' || '' }}
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
@@ -133,7 +133,7 @@ jobs:
 
       - name: Build release
         env:
-          MOTIF_LX_APP_FIXTURE: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture }}
+          MOTIF_LX_APP_FIXTURE: ${{ github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture) }}
         shell: pwsh
         run: |
           $flutterArgs = @('build', 'windows', '--release', '--no-pub')
@@ -145,6 +145,6 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: motif-windows-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture && '-lx-fixture' || '' }}
+          name: motif-windows-${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}${{ (github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture)) && '-lx-fixture' || '' }}
           path: build/windows/x64/runner/Release/
           if-no-files-found: error

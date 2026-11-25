@@ -1,3 +1,4 @@
+import '../../audio/controlled_pcm.dart';
 import '../../library/domain/audio_quality.dart';
 import '../../library/domain/library_models.dart';
 import '../../library/domain/library_playback_error.dart';
@@ -63,6 +64,7 @@ class TrackPlaybackResolver {
     String preferredSourceId = 'qq',
     String? fallbackSourceId,
     AudioQuality? reportedQuality,
+    PcmCancellation? cancellation,
   }) async {
     void checkCurrent() {
       if (!isCurrent()) throw const PlaybackCancelled();
@@ -103,8 +105,8 @@ class TrackPlaybackResolver {
       preferredSourceId: preferredSourceId,
       fallbackSourceId: fallbackSourceId,
       checkActive: checkCurrent,
+      cancellation: cancellation,
     );
-    checkCurrent();
     return ResolvedPlaybackTrack(uri: stream.uri.toString(), stream: stream);
   }
 }

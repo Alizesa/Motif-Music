@@ -12,6 +12,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
 import android.util.Log;
+import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.net.InetAddress;
 import java.net.SocketException;
@@ -34,6 +35,9 @@ public final class ProbeService extends Service {
     private static final int CANARY_ACCESS_UNVERIFIED = 12;
     private static final int LOOPBACK_ACCESS_UNVERIFIED = 13;
     private static final int NO_OWNER = -1;
+    private static final int SCRIPT_LIMIT = 768 * 1024;
+    private static final int MESSAGE_LIMIT = 64 * 1024;
+    private static final int PART_BYTES = 32 * 1024;
 
     private final AtomicInteger owner = new AtomicInteger(NO_OWNER);
     private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
@@ -57,6 +61,20 @@ public final class ProbeService extends Service {
         @Override
         public void stop() {
             if (Binder.getCallingUid() == owner.get()) stopProcess();
+        }
+
+        @Override
+        public void startScript(String canary, int port, IProbeResult result,
+                                IScriptBroker broker) {
+            final int caller = Binder.getCallingUid();
+            if (canary == null || canary.isEmpty() || canary.length() > 4096
+                    || port < 1 || port > 65535 || result == null || broker == null
+                    || caller == Process.myUid() || !owner.compareAndSet(NO_OWNER, caller)) {
+                return;
+            }
+            watchdog.schedule(ProbeService::stopProcess, 8, TimeUnit.SECONDS);
+            new Thread(() -> runScript(canary, port, result, broker),
+                    "motif-lx-script").start();
         }
     };
 
@@ -92,6 +110,45 @@ public final class ProbeService extends Service {
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             code = RUNNER_FAILURE;
+        } catch (LinkageError | RuntimeException | RemoteException error) {
+            code = RUNNER_FAILURE;
+        }
+        try {
+            result.report(code, Process.myUid());
+        } catch (RemoteException ignored) {
+            stopProcess();
+        }
+    }
+
+    private void runScript(String canary, int port, IProbeResult result, IScriptBroker broker) {
+        int code;
+        try {
+            code = checkIsolation(canary, port);
+            if (code == 0) {
+                System.loadLibrary("motif_lx_probe");
+                final byte[] parameters = broker.part(-1);
+                final ByteArrayOutputStream script = new ByteArrayOutputStream();
+                boolean ended = false;
+                for (int index = 0; index <= SCRIPT_LIMIT / PART_BYTES; index++) {
+                    final byte[] part = broker.part(index);
+                    if (part == null || part.length > PART_BYTES
+                            || script.size() + part.length > SCRIPT_LIMIT) break;
+                    if (part.length == 0) {
+                        ended = true;
+                        break;
+                    }
+                    script.write(part, 0, part.length);
+                }
+                code = RUNNER_FAILURE;
+                if (ended && script.size() != 0 && parameters != null
+                        && parameters.length != 0 && parameters.length <= MESSAGE_LIMIT) {
+                    final byte[] reply = nativeScript(script.toByteArray(), parameters, broker);
+                    if (reply != null && reply.length != 0 && reply.length <= MESSAGE_LIMIT) {
+                        broker.publish(reply);
+                        code = 0;
+                    }
+                }
+            }
         } catch (LinkageError | RuntimeException | RemoteException error) {
             code = RUNNER_FAILURE;
         }
@@ -173,4 +230,5 @@ public final class ProbeService extends Service {
 
     private static native int nativeRunFixture();
     private static native int nativePlayback(boolean timeout, IFixtureCatalog catalog);
+    private static native byte[] nativeScript(byte[] script, byte[] parameters, IScriptBroker broker);
 }

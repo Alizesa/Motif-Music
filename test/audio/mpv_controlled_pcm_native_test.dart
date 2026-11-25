@@ -42,14 +42,23 @@ void main() {
       ).writeAsBytes(transport.bytes);
       try {
         await player.setRawProperty('ao', 'null');
+        const identity = 'motif-controlled:lx-test/1';
+        final snapshots = <AudioQueueSnapshot>[];
+        final queueEvents = engine.queue.listen(snapshots.add);
+        addTearDown(queueEvents.cancel);
         final opening = engine.queue
             .firstWhere(
               (queue) => queue.currentTrack?.title == lxFixtureTrackTitle,
             )
             .timeout(const Duration(seconds: 5));
-        await engine.openControlledPcm(wave, title: lxFixtureTrackTitle);
+        await engine.openControlledPcm(
+          wave,
+          title: lxFixtureTrackTitle,
+          identity: identity,
+        );
         await lengthKnown.timeout(const Duration(seconds: 5));
-        final initial = (await opening).currentTrack!.uri;
+        expect((await opening).currentTrack!.uri, identity);
+        final initial = player.state.file.path;
         expect(initial, startsWith('mak-pcm:'));
         expect(initial, isNot(contains('https:')));
         expect(
@@ -78,6 +87,23 @@ void main() {
         expect(transport.readers.first.closed, isTrue);
         expect(player.state.file.path, isNot(initial));
         expect(player.state.file.path, startsWith('mak-pcm:'));
+        final firstTrack = snapshots.indexWhere(
+          (item) => item.currentTrack?.uri == identity,
+        );
+        expect(firstTrack, isNonNegative);
+        expect(
+          snapshots
+              .skip(firstTrack)
+              .every((item) => item.currentTrack?.uri == identity),
+          isTrue,
+        );
+        expect(
+          snapshots
+              .where((item) => item.currentTrack?.title == lxFixtureTrackTitle)
+              .map((item) => item.currentTrack!.uri)
+              .toSet(),
+          {identity},
+        );
 
         final delayed = transport.pending = Completer<void>();
         final stale = expectLater(

@@ -291,14 +291,14 @@ void VerifyWorkerJob(HANDLE job, HANDLE process) {
   }
 }
 
-bool AppCancelled() {
+bool AppCancelled(bool script = false) {
   const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
   if (!input || input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_PIPE) {
     return false;
   }
   DWORD waiting = 0;
   if (!PeekNamedPipe(input, nullptr, 0, nullptr, &waiting, nullptr)) return true;
-  return waiting != 0;
+  return !script && waiting != 0;
 }
 
 void WaitForPlaybackFixture(HANDLE process, const ProgressCell& progress,
@@ -326,12 +326,21 @@ void WaitForPlaybackFixture(HANDLE process, const ProgressCell& progress,
   Require(replied != timeout, "verify fixture catalogue callback count");
 }
 
-// The worker inherits only a readiness event and a small progress section.
+void DuplicateAppPipe(DWORD stream, Handle& target) {
+  const HANDLE source = GetStdHandle(stream);
+  Require(source && source != INVALID_HANDLE_VALUE && GetFileType(source) == FILE_TYPE_PIPE,
+          "verify script controller pipe");
+  Require(DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &target.value,
+                          0, TRUE, DUPLICATE_SAME_ACCESS), "duplicate script controller pipe");
+}
+
+// Script runs also inherit the two directional pipes to the application.
 void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
             const Loopback& listener, u_short port, std::wstring_view mode,
             bool app = false) {
   VerifyListener(listener);
   const bool stall = mode == L"stall";
+  const bool script = mode == L"lx-script";
   const bool playback_fixture = mode == L"lx-fixed" || mode == L"lx-timeout";
   const Handle job(CreateJobObjectW(nullptr, nullptr));
   Require(job.value, "create fixture job");
@@ -345,7 +354,13 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
                                           static_cast<DWORD>(ProgressCell::kBytes), nullptr));
   Require(section.value, "create fixture progress section");
   const ProgressCell progress(section.value);
-  HANDLE allowed_handles[]{ready.value, section.value};
+  Handle input;
+  Handle output;
+  if (script) {
+    DuplicateAppPipe(STD_INPUT_HANDLE, input);
+    DuplicateAppPipe(STD_OUTPUT_HANDLE, output);
+  }
+  HANDLE allowed_handles[]{ready.value, section.value, input.value, output.value};
   SECURITY_CAPABILITIES capabilities{profile.sid, nullptr, 0, 0};
   DWORD prohibit_children = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
   DWORD64 mitigation = PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
@@ -355,7 +370,8 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
   attributes.Set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &prohibit_children,
                  sizeof(prohibit_children));
   attributes.Set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &mitigation, sizeof(mitigation));
-  attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allowed_handles, sizeof(allowed_handles));
+  attributes.Set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allowed_handles,
+                 (script ? 4 : 2) * sizeof(HANDLE));
 
   std::wstring args = L"motif-lx-fixture " +
       SidString(profile.sid) + L" \"" + files.canary + L"\" " +
@@ -363,6 +379,10 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
       std::to_wstring(reinterpret_cast<std::uintptr_t>(ready.value)) + L" " +
       std::wstring(mode) + L" " +
       std::to_wstring(reinterpret_cast<std::uintptr_t>(section.value));
+  if (script) {
+    args += L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(input.value)) +
+            L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(output.value));
+  }
   auto environment = WorkerEnvironment();
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
@@ -385,7 +405,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     const auto expires = GetTickCount64() + kStartupTimeout;
     DWORD ready_result;
     do {
-      if (app && AppCancelled()) {
+      if (app && AppCancelled(script)) {
         SetLastError(ERROR_CANCELLED);
         Fail("app cancelled fixture before readiness");
       }
@@ -410,6 +430,14 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
               "reap a stalled worker");
     } else if (playback_fixture) {
       WaitForPlaybackFixture(process.value, progress, mode == L"lx-timeout", app);
+    } else if (script) {
+      const auto deadline = GetTickCount64() + 7800;
+      for (;;) {
+        const DWORD state = WaitForSingleObject(process.value, 10);
+        if (state == WAIT_OBJECT_0) break;
+        Require(state == WAIT_TIMEOUT && GetTickCount64() < deadline &&
+                    !AppCancelled(true), "wait for isolated script");
+      }
     } else {
       Require(WaitForSingleObject(process.value, kFixtureTimeout) == WAIT_OBJECT_0,
               "bounded QuickJS fixtures");
@@ -425,7 +453,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     const LONG network_error = progress.NetworkError();
     Require(network_error == WSAEACCES || network_error == WSAETIMEDOUT,
             "verify the loopback check completed");
-    std::printf("AppContainer loopback blocked (status %ld)\n", network_error);
+    if (!script) std::printf("AppContainer loopback blocked (status %ld)\n", network_error);
   } catch (...) {
     // Also covers a failure before the process joined its job.
     TerminateProcess(process.value, 0x72);
@@ -459,6 +487,7 @@ int Run(std::wstring_view app_mode = {}) {
   const auto port = BindLoopback(server);
   if (!app_mode.empty()) {
     Launch(restricted.value, files, profile, server, port, app_mode, true);
+    if (app_mode == L"lx-script") return 0;
     std::puts(app_mode == L"lx-timeout" ? "MOTIF_LX_TIMEOUT" : "MOTIF_LX_FIXED_WAVE");
     return 0;
   }
@@ -478,6 +507,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 1) return Run();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--app-fixture") return Run(L"lx-fixed");
     if (argc == 2 && std::wstring_view(argv[1]) == L"--app-fixture-timeout") return Run(L"lx-timeout");
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--app-script") return Run(L"lx-script");
     return 81;
   } catch (const std::exception&) {
     return 82;
