@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/controlled_pcm.dart';
+import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/lx/lx_http_connection.dart';
 import 'package:motif/online/lx/lx_network.dart';
 import 'package:motif/online/lx/lx_request_error.dart';
@@ -16,6 +17,69 @@ LxApiRequest request([Map<String, Object?> options = const {}]) =>
     });
 
 void main() {
+  test('a response beyond the old three-second cap completes within the bounded request budget', () async {
+    final body = _Body(utf8.encode('ok'));
+    final transport = LxHttpsTransport(
+      open: (_, _, _, _, scope) async {
+        await scope.until(
+          Future<void>.delayed(const Duration(milliseconds: 3200)),
+        );
+        return (
+          status: 200,
+          reason: 'OK',
+          headers: {
+            'content-length': ['2'],
+          },
+          body: body,
+        );
+      },
+    );
+    expect((await transport.api(request(), PcmCancellation()))['body'], 'ok');
+    expect(body.closed, isTrue);
+  });
+
+  test('request timeout is distinguished from user cancellation without exposing the URL', () async {
+    final transport = LxHttpsTransport(
+      open: (_, _, _, _, scope) async {
+        return scope.until(Completer<LxWireResponse>().future);
+      },
+    );
+    await expectLater(
+      transport.api(request({'timeout': 20}), PcmCancellation()),
+      throwsA(
+        isA<LxRequestException>().having(
+          (error) => error.reason,
+          'reason',
+          LxRequestFailure.timeout,
+        ),
+      ),
+    );
+    expect(
+      const LxRequestException(LxRequestFailure.timeout).toString(),
+      isNot(contains('https:')),
+    );
+  });
+
+  test('DNS, connection and TLS failures survive the transport without becoming a generic error', () async {
+    for (final reason in [
+      LxRequestFailure.dns,
+      LxRequestFailure.connect,
+      LxRequestFailure.tls,
+    ]) {
+      final transport = LxHttpsTransport(
+        open: (_, _, _, _, _) async => throw LxRequestException(reason),
+      );
+      await expectLater(
+        transport.api(request(), PcmCancellation()),
+        throwsA(
+          isA<LxRequestException>()
+              .having((error) => error.reason, 'reason', reason)
+              .having((error) => error.kind, 'kind', OnlineErrorKind.transport),
+        ),
+      );
+    }
+  });
+
   test('LX headers retain script values and common defaults without application credentials', () {
     final parsed = request({
       'headers': {

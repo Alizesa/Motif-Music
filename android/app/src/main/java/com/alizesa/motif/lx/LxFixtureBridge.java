@@ -217,7 +217,7 @@ public final class LxFixtureBridge implements AutoCloseable {
                 if (!verifyCanary()) throw new IOException("fixture canary");
                 listener = new ServerSocket(0, 1,
                         InetAddress.getByAddress(new byte[]{127, 0, 0, 1}));
-                main.postDelayed(deadline, script == null ? 8000 : 10500);
+                main.postDelayed(deadline, script == null ? 8000 : 36500);
                 bound = context.bindService(new Intent(context, ProbeService.class),
                         this, Context.BIND_AUTO_CREATE);
                 if (!bound) stop("fixture-unavailable");
@@ -294,7 +294,7 @@ public final class LxFixtureBridge implements AutoCloseable {
                 @Override
                 public byte[] request(byte[] message) {
                     if (!fromWorker() || !validBytes(message, MESSAGE_LIMIT)
-                            || scriptCalls.incrementAndGet() > 500) return null;
+                            || scriptCalls.incrementAndGet() > 2400) return null;
                     final CountDownLatch ready = new CountDownLatch(1);
                     final AtomicReference<byte[]> reply = new AtomicReference<>();
                     main.post(() -> {

@@ -431,7 +431,7 @@ void Launch(HANDLE token, const ProbeFiles& files, const Profile& profile,
     } else if (playback_fixture) {
       WaitForPlaybackFixture(process.value, progress, mode == L"lx-timeout", app);
     } else if (script) {
-      const auto deadline = GetTickCount64() + 7800;
+      const auto deadline = GetTickCount64() + 28000;
       for (;;) {
         const DWORD state = WaitForSingleObject(process.value, 10);
         if (state == WAIT_OBJECT_0) break;

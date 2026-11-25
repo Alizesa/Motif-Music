@@ -14,6 +14,7 @@ import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/domain/playback_source.dart';
 import 'package:motif/online/lx/lx_network.dart';
+import 'package:motif/online/lx/lx_request_error.dart';
 import 'package:motif/online/lx/lx_audio_media.dart';
 import 'package:motif/online/lx/fixture/lx_fixture_wave.dart';
 import 'package:motif/online/lx/lx_source_manager.dart';
@@ -58,6 +59,10 @@ void main() {
   late String mediaUrl;
   late int requestAttempts;
   var unsupportedFirst = false;
+  LxRequestFailure? transportFailure;
+  var useLastCandidate = false;
+  var transientFailures = 0;
+  var noResult = false;
   ControlledAudioInput? mediaInput;
 
   setUp(() async {
@@ -71,6 +76,10 @@ void main() {
     handled = 0;
     blocked = false;
     unsupportedFirst = false;
+    transportFailure = null;
+    useLastCandidate = false;
+    transientFailures = 0;
+    noResult = false;
     mediaInput = null;
     mediaUrl = 'https://$_media/track.wav';
     requestAttempts = 1;
@@ -134,7 +143,7 @@ void main() {
                 {'error': 'denied'},
               );
             }
-            final response = await onRequest({
+            var response = await onRequest({
               'url': 'https://$_api/track',
               'options': <String, Object?>{},
             }, cancellation);
@@ -143,15 +152,26 @@ void main() {
                 'url': 'https://candidate$i.example.test/track',
                 'options': <String, Object?>{},
               }, cancellation);
-              expect(next.containsKey('response'), i < 4 && !blocked);
+              expect(
+                next.containsKey('response'),
+                i < 4 && !blocked && transportFailure == null,
+              );
+              if (useLastCandidate) response = next;
             }
-            return response.containsKey('response')
+            return response.containsKey('response') && !noResult
                 ? {'url': mediaUrl}
                 : {'error': 'unavailable'};
           },
       fetch: (request, _) async {
         fetched.add(request.uri);
         if (blocked) throw const OnlineException(OnlineErrorKind.rateLimited);
+        if (transportFailure case final reason?) {
+          throw LxRequestException(reason);
+        }
+        if (transientFailures > 0) {
+          transientFailures--;
+          throw const LxRequestException(LxRequestFailure.timeout);
+        }
         return {
           'statusCode': 200,
           'body': {'ok': true},
@@ -500,6 +520,63 @@ void main() {
     expect(opened, hasLength(1));
     stream.input.close();
   });
+
+  test('an early failed candidate does not turn a later server reply into a network failure', () async {
+    final id = await enable();
+    // A later response can either resolve playback or be rejected by the
+    // script. Neither outcome should inherit the first candidate's timeout.
+    requestAttempts = 2;
+    useLastCandidate = true;
+    transientFailures = 1;
+    final stream = await registry.resolve(
+      track,
+      OnlineQuality.standard,
+      preferredSourceId: id,
+    ) as ControlledOnlineStream;
+    expect(fetched, hasLength(2));
+    stream.input.close();
+    transientFailures = 1;
+    noResult = true;
+    await expectLater(
+      registry.resolve(track, OnlineQuality.standard, preferredSourceId: id),
+      throwsA(
+        isA<OnlineException>().having(
+          (error) => error.kind,
+          'kind',
+          OnlineErrorKind.unavailable,
+        ),
+      ),
+    );
+  });
+
+  test(
+    'the last DNS or TLS failure remains visible through managed playback',
+    () async {
+      final id = await enable();
+      for (final reason in [
+        LxRequestFailure.dns,
+        LxRequestFailure.tls,
+        LxRequestFailure.timeout,
+      ]) {
+        transportFailure = reason;
+        await expectLater(
+          registry.resolve(
+            track,
+            OnlineQuality.standard,
+            preferredSourceId: id,
+          ),
+          throwsA(
+            isA<LxRequestException>().having(
+              (error) => error.reason,
+              'reason',
+              reason,
+            ),
+          ),
+        );
+      }
+      expect(opened, isEmpty);
+    },
+  );
 
   test('an invalid first import does not leave a disabled or half-installed source', () async {
     expect(await manager.import(utf8.encode('$_script invalid;')), isFalse);

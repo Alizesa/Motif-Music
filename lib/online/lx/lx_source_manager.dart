@@ -313,7 +313,8 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
         }
         if (!broker.admitted && broker.denied != null) throw broker.denied!;
         if (broker.transmissionFailed || result['error'] == 'timeout') {
-          throw const OnlineException(OnlineErrorKind.transport);
+          throw broker.lastTransportFailure ??
+              const LxRequestException(LxRequestFailure.scriptTimeout);
         }
         throw OnlineException(switch (result['error']) {
           'unsupported' => OnlineErrorKind.unsupported,
@@ -381,6 +382,7 @@ final class _LxRequestBudget {
   int _requests = 0;
   bool get admitted => _requests > 0;
   bool transmissionFailed = false;
+  OnlineException? lastTransportFailure;
   OnlineException? denied;
   OnlineException? terminal;
 
@@ -408,6 +410,10 @@ final class _LxRequestBudget {
       );
       _requests++;
       final result = {'response': await fetch(request, cancellation)};
+      // A later valid response supersedes an earlier candidate's network
+      // failure; parsing that response is the script's next decision.
+      transmissionFailed = false;
+      lastTransportFailure = null;
       if (utf8.encode(jsonEncode(result)).length > lxMessageLimit) {
         terminal = const OnlineException(OnlineErrorKind.malformedResponse);
         return refused;
@@ -425,12 +431,14 @@ final class _LxRequestBudget {
         denied = error;
       } else if (error.kind == OnlineErrorKind.transport) {
         transmissionFailed = true;
+        lastTransportFailure = error;
       } else {
         terminal = error;
       }
       return refused;
     } on IOException {
       transmissionFailed = true;
+      lastTransportFailure = const LxRequestException(LxRequestFailure.connect);
       return refused;
     } on FormatException {
       terminal = const OnlineException(OnlineErrorKind.malformedResponse);

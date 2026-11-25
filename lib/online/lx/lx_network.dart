@@ -364,13 +364,13 @@ final class LxHttpsTransport {
       };
     } on PcmCancelled {
       cancellation.check();
-      throw const OnlineException(OnlineErrorKind.transport);
+      throw const LxRequestException(LxRequestFailure.timeout);
     } on FixtureMediaException catch (error) {
       cancellation.check();
       if (error.kind == FixtureMediaFailure.denied) {
         throw const LxRequestException(LxRequestFailure.privateAddress);
       }
-      throw const OnlineException(OnlineErrorKind.transport);
+      throw const LxRequestException(LxRequestFailure.response);
     } finally {
       reply?.body.close();
       deadline.cancel();

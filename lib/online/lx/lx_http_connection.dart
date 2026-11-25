@@ -7,7 +7,7 @@ import '../../audio/controlled_pcm.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_request_error.dart';
 
-const lxWireTimeout = Duration(seconds: 3);
+const lxWireTimeout = Duration(seconds: 6);
 typedef LxWireResponse = ({
   int status,
   String reason,
@@ -38,12 +38,18 @@ Future<LxWireResponse> openLxHttps(
 ) async {
   final stopping = PcmCancellation();
   final unlisten = cancellation.listen(stopping.cancel);
-  final budget = Timer(lxWireTimeout, stopping.cancel);
+  var timedOut = false;
+  var phase = LxRequestFailure.dns;
+  final budget = Timer(lxWireTimeout, () {
+    timedOut = true;
+    stopping.cancel();
+  });
   LxSocketBody? body;
   try {
     stopping.check();
     final addresses = await stopping.until(InternetAddress.lookup(uri.host));
     final approved = selectLxPublicAddress(addresses);
+    phase = LxRequestFailure.connect;
     stopping.check();
     final task = await stopping.until(
       RawSocket.startConnect(approved, 443),
@@ -73,6 +79,7 @@ Future<LxWireResponse> openLxHttps(
         throw const LxRequestException(LxRequestFailure.privateAddress);
       }
       final host = uri.host;
+      phase = LxRequestFailure.tls;
       final secure = await stopping.until(
         RawSecureSocket.secure(raw, host: host),
         discard: (late) => unawaited(late.close()),
@@ -82,6 +89,7 @@ Future<LxWireResponse> openLxHttps(
         stopping.check();
       }
       body = LxSocketBody(secure, stopping, unlisten);
+      phase = LxRequestFailure.response;
       final path = uri.path.isEmpty ? '/' : uri.path;
       final target = uri.hasQuery ? '$path?${uri.query}' : path;
       final request = StringBuffer('$method $target HTTP/1.1\r\n')
@@ -115,9 +123,13 @@ Future<LxWireResponse> openLxHttps(
     body?.close();
     unlisten();
     cancellation.check();
-    if (error is FixtureMediaException) rethrow;
     if (error is LxRequestException) rethrow;
-    throw const FixtureMediaException(FixtureMediaFailure.transport);
+    if (error is FixtureMediaException &&
+        error.kind == FixtureMediaFailure.denied) {
+      rethrow;
+    }
+    if (timedOut) throw const LxRequestException(LxRequestFailure.timeout);
+    throw LxRequestException(phase);
   } finally {
     budget.cancel();
   }
@@ -262,9 +274,9 @@ final class LxSocketBody implements LxWireBody {
     try {
       return await _receive(maximum);
     } on PcmCancelled {
-      throw const FixtureMediaException(FixtureMediaFailure.transport);
+      throw const LxRequestException(LxRequestFailure.timeout);
     } on SocketException {
-      throw const FixtureMediaException(FixtureMediaFailure.transport);
+      throw const LxRequestException(LxRequestFailure.response);
     } finally {
       timer.cancel();
     }

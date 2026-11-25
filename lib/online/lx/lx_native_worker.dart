@@ -7,10 +7,13 @@ import 'package:flutter/services.dart';
 
 import '../../audio/controlled_pcm.dart';
 import '../domain/online_error.dart';
+import 'lx_request_error.dart';
 import 'fixture/lx_fixture_runtime.dart';
 
 const lxScriptLimit = 768 * 1024;
 const lxMessageLimit = 64 * 1024;
+const lxWorkerTimeout = Duration(seconds: 34);
+const lxScriptExchangeLimit = 2400;
 const _channel = MethodChannel('motif/lx_fixture');
 
 typedef LxRequestHandler = Future<Map<String, Object?>> Function(
@@ -42,7 +45,7 @@ final class LxNativeWorker {
     });
     final scope = PcmCancellation();
     final remove = cancellation.listen(scope.cancel);
-    final deadline = Timer(const Duration(seconds: 9), scope.cancel);
+    final deadline = Timer(lxWorkerTimeout, scope.cancel);
     final exchange = _ScriptExchange(scope, onRequest);
 
     try {
@@ -53,11 +56,10 @@ final class LxNativeWorker {
       return _decode(result);
     } catch (_) {
       cancellation.check();
-      throw OnlineException(
-        scope.cancelled
-            ? OnlineErrorKind.transport
-            : OnlineErrorKind.operationRejected,
-      );
+      if (scope.cancelled) {
+        throw const LxRequestException(LxRequestFailure.scriptTimeout);
+      }
+      throw const OnlineException(OnlineErrorKind.operationRejected);
     } finally {
       exchange.cancel();
       deadline.cancel();
@@ -182,7 +184,7 @@ final class _ScriptExchange {
     scope.check();
     if (message.isEmpty ||
         message.length > lxMessageLimit ||
-        ++_messages > 500) {
+        ++_messages > lxScriptExchangeLimit) {
       throw const FormatException('LX broker message');
     }
     if (message.first == 81 && _pending == null && ++_requests <= 12) {

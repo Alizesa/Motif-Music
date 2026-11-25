@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class ProbeService extends Service {
+    public static final int SCRIPT_WATCHDOG_SECONDS = 30;
     static final int RUN_FIXTURES = 1;
     static final int STALL_FIXTURE = 2;
     public static final int PLAYBACK_FIXTURE = 3;
@@ -72,7 +73,7 @@ public final class ProbeService extends Service {
                     || caller == Process.myUid() || !owner.compareAndSet(NO_OWNER, caller)) {
                 return;
             }
-            watchdog.schedule(ProbeService::stopProcess, 8, TimeUnit.SECONDS);
+            watchdog.schedule(ProbeService::stopProcess, SCRIPT_WATCHDOG_SECONDS, TimeUnit.SECONDS);
             new Thread(() -> runScript(canary, port, result, broker),
                     "motif-lx-script").start();
         }

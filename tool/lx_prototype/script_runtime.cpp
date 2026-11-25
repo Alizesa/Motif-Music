@@ -17,7 +17,7 @@ constexpr char kError[] = R"({"error":"script"})";
 struct ScriptRuntime {
   JSRuntime* runtime = JS_NewRuntime();
   JSContext* context = nullptr;
-  const Clock::time_point deadline = Clock::now() + 6s;
+  const Clock::time_point deadline = Clock::now() + std::chrono::seconds(kLxScriptTimeoutSeconds);
   int jobs = 0;
 
   ScriptRuntime() {
@@ -93,7 +93,7 @@ std::string RunLxScript(std::string_view script, std::string_view parameters,
 
   std::string response;
   int requests = 0;
-  for (int actions = 0; actions < 600 && !runtime.Expired(); ++actions) {
+  for (int actions = 0; actions < kLxScriptExchangeLimit && !runtime.Expired(); ++actions) {
     if (!runtime.DrainJobs()) return kError;
     Value argument{context, response.empty() ? JS_UNDEFINED
         : JS_NewStringLen(context, response.data(), response.size())};
