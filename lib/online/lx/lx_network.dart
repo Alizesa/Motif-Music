@@ -70,7 +70,7 @@ final class LxApiRequest {
     if (!const {'GET', 'HEAD', 'POST'}.contains(method) ||
         options['binary'] == true ||
         options['formData'] != null) {
-      throw const OnlineException(OnlineErrorKind.unsupported);
+      throw const OnlineException(OnlineErrorKind.unsupportedRequest);
     }
     final headers = <String, String>{};
     final supplied = options['headers'];
@@ -305,12 +305,15 @@ final class LxMediaTransport implements FixtureRangeTransport {
           throw const OnlineException(OnlineErrorKind.rejected);
         }
         final reply = await _open(next, {
-          'accept': 'audio/wav, application/octet-stream',
+          'accept':
+              'audio/mpeg, audio/flac, audio/wav, application/octet-stream',
           'range': 'bytes=$offset-',
           'if-range': ?validator,
         }, scope);
         if (!const {301, 302, 303, 307, 308}.contains(reply.status)) {
-          if (offset == 0 && reply.status == 206) _representation = next;
+          if (offset == 0 && const {200, 206}.contains(reply.status)) {
+            _representation = next;
+          }
           return FixtureRangeResponse(
             status: reply.status,
             headers: reply.headers,

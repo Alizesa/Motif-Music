@@ -1,14 +1,19 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+abstract interface class ControlledAudioInput {
+  void close();
+}
+
 /// Sample data owned by the host. The audio engine never receives its URL.
-abstract interface class ControlledPcmInput {
+abstract interface class ControlledPcmInput implements ControlledAudioInput {
   int get channels;
   int get sampleRate;
   int get frames;
   bool get seekable;
 
   Future<ControlledPcmRead> openAt(int frame, PcmCancellation cancellation);
+  @override
   void close();
 }
 

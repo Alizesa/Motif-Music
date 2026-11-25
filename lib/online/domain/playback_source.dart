@@ -45,7 +45,7 @@ final class ControlledOnlineStream extends OnlineStream {
     required this.owner,
   });
 
-  final ControlledPcmInput input;
+  final ControlledAudioInput input;
   final PcmCancellation owner;
 }
 

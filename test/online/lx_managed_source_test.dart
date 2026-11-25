@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/audio_engine.dart';
 import 'package:motif/audio/controlled_pcm.dart';
+import 'package:motif/audio/controlled_encoded.dart';
 import 'package:motif/library/domain/local_playback_matcher.dart';
 import 'package:motif/online/application/online_playback_controller.dart';
 import 'package:motif/online/application/track_playback_resolver.dart';
@@ -13,6 +14,7 @@ import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/domain/playback_source.dart';
 import 'package:motif/online/lx/lx_network.dart';
+import 'package:motif/online/lx/lx_audio_media.dart';
 import 'package:motif/online/lx/fixture/lx_fixture_wave.dart';
 import 'package:motif/online/lx/lx_source_manager.dart';
 import 'package:motif/online/lx/lx_source_store.dart';
@@ -21,6 +23,7 @@ import 'package:motif/settings/online_playback_preferences.dart';
 import 'package:motif/settings/online_playback_settings_controller.dart';
 
 import '../support/library_fixtures.dart';
+import '../support/lx_encoded_fixture.dart';
 import 'playback_fakes.dart';
 
 const _api = 'api.example.test';
@@ -54,6 +57,7 @@ void main() {
   late QqTrack track;
   late String mediaUrl;
   late int requestAttempts;
+  ControlledAudioInput? mediaInput;
 
   setUp(() async {
     root = await Directory.systemTemp.createTemp('motif-lx-managed-');
@@ -65,6 +69,7 @@ void main() {
     initialized = 0;
     handled = 0;
     blocked = false;
+    mediaInput = null;
     mediaUrl = 'https://$_media/track.wav';
     requestAttempts = 1;
     paused = null;
@@ -142,7 +147,7 @@ void main() {
       open: (uri, owner, _) async {
         expect(owner.cancelled, isFalse);
         opened.add(uri);
-        return _Input();
+        return mediaInput ?? _Input();
       },
     );
   });
@@ -320,59 +325,97 @@ void main() {
     },
   );
 
-  test('catalog playback prefers local files then uses the controlled player entry', () async {
-    final id = await enable();
-    final settings = OnlinePlaybackSettingsController(
-      MemoryPlaybackPreferencesStore(),
-    );
-    await settings.initialize();
-    await settings.save(OnlinePlaybackPreferences(preferredSourceId: id));
-    final engine = _ControlledPlayer();
-    final local = playbackFile(1);
-    var matched = true;
-    final controller = OnlinePlaybackController(
-      engine: engine,
-      settings: settings,
-      resolver: TrackPlaybackResolver(
-        sources: registry,
-        matchLocal: (_, _) async => matched
-            ? LocalPlaybackResolution(
-                status: LocalPlaybackStatus.selected,
-                reason: LocalPlaybackReason.uniqueVersion,
-                candidates: [local],
-                selected: local,
-              )
-            : LocalPlaybackResolution(
-                status: LocalPlaybackStatus.noMatch,
-                reason: LocalPlaybackReason.noCandidates,
-                candidates: [],
-              ),
-        prepareLocal: (file) async => file,
-      ),
-      confirmLocal: (_, _) async => null,
-    );
-    addTearDown(() async {
-      controller.dispose();
-      settings.dispose();
-      await engine.dispose();
-    });
-    expect(await controller.playQueue([track]), isTrue);
-    expect(engine.opened.single.uri, local.location.locator);
-    expect(fetched, isEmpty);
+  for (final format in [null, ...ControlledAudioFormat.values]) {
+    test(
+      'catalog playback prefers local files then uses the controlled ${format?.name ?? 'PCM'} entry',
+      () async {
+        if (format != null) {
+          mediaInput = await openLxAudio(
+            EncodedFixtureTransport(
+              format == ControlledAudioFormat.mp3
+                  ? mp3Fixture()
+                  : flacFixture(),
+            ),
+            PcmCancellation(),
+          );
+        }
+        final id = await enable();
+        final settings = OnlinePlaybackSettingsController(
+          MemoryPlaybackPreferencesStore(),
+        );
+        await settings.initialize();
+        await settings.save(OnlinePlaybackPreferences(preferredSourceId: id));
+        final engine = _ControlledPlayer();
+        final local = playbackFile(1);
+        var matched = true;
+        final controller = OnlinePlaybackController(
+          engine: engine,
+          settings: settings,
+          resolver: TrackPlaybackResolver(
+            sources: registry,
+            matchLocal: (_, _) async => matched
+                ? LocalPlaybackResolution(
+                    status: LocalPlaybackStatus.selected,
+                    reason: LocalPlaybackReason.uniqueVersion,
+                    candidates: [local],
+                    selected: local,
+                  )
+                : LocalPlaybackResolution(
+                    status: LocalPlaybackStatus.noMatch,
+                    reason: LocalPlaybackReason.noCandidates,
+                    candidates: [],
+                  ),
+            prepareLocal: (file) async => file,
+          ),
+          confirmLocal: (_, _) async => null,
+        );
+        addTearDown(() async {
+          controller.dispose();
+          settings.dispose();
+          await engine.dispose();
+        });
+        expect(await controller.playQueue([track]), isTrue);
+        expect(engine.opened.single.uri, local.location.locator);
+        expect(fetched, isEmpty);
 
-    matched = false;
-    expect(await controller.playQueue([track]), isTrue);
-    expect(engine.bound, isNotNull);
-    expect(engine.opened.single.uri, startsWith('motif-controlled:'));
-    expect(qq.calls, 0);
-    expect(controller.currentTrack?.identity, track.identity);
+        matched = false;
+        expect(await controller.playQueue([track]), isTrue);
+        expect(engine.bound, isNotNull);
+        expect(engine.opened.single.uri, startsWith('motif-controlled:'));
+        expect(qq.calls, 0);
+        expect(controller.currentTrack?.identity, track.identity);
 
-    expect(await manager.remove(id), isTrue);
-    expect(engine.revoked, isTrue);
-    expect(await controller.playQueue([track]), isTrue);
-    expect(engine.opened.single.uri, startsWith('https://qq.example.test/'));
-    expect(fetched, hasLength(1));
-  });
+        expect(await manager.remove(id), isTrue);
+        expect(engine.revoked, isTrue);
+        expect(await controller.playQueue([track]), isTrue);
+        expect(
+          engine.opened.single.uri,
+          startsWith('https://qq.example.test/'),
+        );
+        expect(fetched, hasLength(1));
+      },
+    );
+  }
+
+  test(
+    'an unsupported requested tier is reported before any API or media request',
+    () async {
+      final id = await enable();
+      await expectLater(
+        registry.resolve(track, OnlineQuality.lossless, preferredSourceId: id),
+        throwsA(
+          isA<OnlineException>().having(
+            (error) => error.kind,
+            'kind',
+            OnlineErrorKind.unsupportedQuality,
+          ),
+        ),
+      );
+      expect(fetched, isEmpty);
+      expect(opened, isEmpty);
+      expect(handled, 0);
+    },
+  );
 
   test('unsafe URLs and application credential headers are still rejected', () {
     for (final raw in [
@@ -585,8 +628,8 @@ final class _Input implements ControlledPcmInput {
 }
 
 final class _ControlledPlayer extends FakeAudioEngine
-    implements ControlledPcmAudioEngine {
-  ControlledPcmInput? bound;
+    implements ControlledPcmAudioEngine, ControlledEncodedAudioEngine {
+  ControlledAudioInput? bound;
   bool revoked = false;
 
   @override
@@ -598,6 +641,43 @@ final class _ControlledPlayer extends FakeAudioEngine
     String? identity,
     PcmCancellation? cancellation,
     PcmCancellation? opening,
+  }) => _open(
+    input,
+    title: title,
+    artist: artist,
+    album: album,
+    identity: identity!,
+    cancellation: cancellation,
+    opening: opening,
+  );
+
+  @override
+  Future<void> openControlledEncoded(
+    ControlledEncodedInput input, {
+    required String title,
+    String? artist,
+    String? album,
+    required String identity,
+    PcmCancellation? cancellation,
+    PcmCancellation? opening,
+  }) => _open(
+    input,
+    title: title,
+    artist: artist,
+    album: album,
+    identity: identity,
+    cancellation: cancellation,
+    opening: opening,
+  );
+
+  Future<void> _open(
+    ControlledAudioInput input, {
+    required String title,
+    String? artist,
+    String? album,
+    required String identity,
+    PcmCancellation? cancellation,
+    PcmCancellation? opening,
   }) async {
     opening?.check();
     bound = input;
@@ -606,7 +686,7 @@ final class _ControlledPlayer extends FakeAudioEngine
       input.close();
     });
     await super.openQueue([
-      AudioTrack(uri: identity!, title: title, artist: artist, album: album),
+      AudioTrack(uri: identity, title: title, artist: artist, album: album),
     ]);
   }
 }

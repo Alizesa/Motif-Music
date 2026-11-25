@@ -128,6 +128,9 @@ jobs:
       - name: Test controlled PCM on the app player
         run: flutter test test/audio/mpv_controlled_pcm_native_test.dart --dart-define=MOTIF_LX_NATIVE_TEST=true --reporter expanded
 
+      - name: Test controlled MP3 and FLAC on the app player
+        run: flutter test test/audio/mpv_controlled_encoded_native_test.dart --dart-define=MOTIF_LX_NATIVE_TEST=true --reporter expanded
+
       - name: Prepare Windows WebView C++ compatibility
         run: python tool/patch_windows_webview.py
 

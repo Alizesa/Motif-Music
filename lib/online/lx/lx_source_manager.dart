@@ -5,12 +5,14 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../../audio/controlled_pcm.dart';
+import '../../audio/controlled_encoded.dart';
 import '../domain/music_source_registry.dart';
 import '../domain/online_error.dart';
 import '../domain/playback_source.dart';
 import '../qq/qq_track.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_native_worker.dart';
+import 'lx_audio_media.dart';
 import 'lx_network.dart';
 import 'lx_playback_source.dart';
 import 'lx_source_store.dart';
@@ -26,7 +28,7 @@ typedef LxFetch = Future<Map<String, Object?>> Function(
   LxApiRequest,
   PcmCancellation,
 );
-typedef LxOpen = Future<ControlledPcmInput> Function(
+typedef LxOpen = Future<ControlledAudioInput> Function(
   Uri,
   PcmCancellation,
   PcmCancellation,
@@ -41,7 +43,7 @@ final class LxSourceManager extends ChangeNotifier {
     LxOpen? open,
   }) : _run = run ?? const LxNativeWorker().run,
        _fetch = fetch ?? const LxHttpsTransport().api,
-       _open = open ?? _openWave;
+       _open = open ?? _openAudio;
 
   final LxSourceStore store;
   final MusicSourceRegistry registry;
@@ -241,11 +243,11 @@ final class LxSourceManager extends ChangeNotifier {
   }
 }
 
-Future<ControlledPcmInput> _openWave(
+Future<ControlledAudioInput> _openAudio(
   Uri uri,
   PcmCancellation owner,
   PcmCancellation request,
-) => FixtureWave.openManaged(LxMediaTransport(uri, owner), request);
+) => openLxAudio(LxMediaTransport(uri, owner), request);
 
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
@@ -277,7 +279,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
     PcmCancellation cancellation,
   ) async {
     if (!source.qualities.contains(quality)) {
-      throw const OnlineException(OnlineErrorKind.unsupported);
+      throw const OnlineException(OnlineErrorKind.unsupportedQuality);
     }
     final owner = PcmCancellation();
     final release = _lifetime.listen(owner.cancel);
@@ -322,6 +324,15 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
         open(uri, owner, work),
         discard: (late) => late.close(),
       );
+      final ControlledAudioInput owned;
+      if (input is ControlledPcmInput) {
+        owned = _OwnedInput(input, release);
+      } else if (input is ControlledEncodedInput) {
+        owned = _OwnedEncodedInput(input, release);
+      } else {
+        input.close();
+        throw const OnlineException(OnlineErrorKind.unsupportedFormat);
+      }
       handedOff = true;
       return ControlledOnlineStream(
         uri: Uri(
@@ -330,7 +341,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
         ),
         sourceId: sourceId,
         requestedQuality: quality,
-        input: _OwnedInput(input, release),
+        input: owned,
         owner: owner,
       );
     } on PcmCancelled {
@@ -341,7 +352,7 @@ final class _ManagedLxSource implements CancellablePlaybackSource {
       throw const OnlineException(OnlineErrorKind.transport);
     } on FixtureMediaException catch (error) {
       throw OnlineException(switch (error.kind) {
-        FixtureMediaFailure.format => OnlineErrorKind.unsupported,
+        FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.transport ||
         FixtureMediaFailure.truncated => OnlineErrorKind.transport,
         _ => OnlineErrorKind.malformedResponse,
@@ -427,6 +438,26 @@ final class _OwnedInput implements ControlledPcmInput {
   @override
   Future<ControlledPcmRead> openAt(int frame, PcmCancellation cancellation) =>
       input.openAt(frame, cancellation);
+  @override
+  void close() {
+    release();
+    input.close();
+  }
+}
+
+final class _OwnedEncodedInput implements ControlledEncodedInput {
+  _OwnedEncodedInput(this.input, this.release);
+  final ControlledEncodedInput input;
+  final void Function() release;
+  @override
+  ControlledAudioFormat get format => input.format;
+  @override
+  int get size => input.size;
+  @override
+  bool get seekable => input.seekable;
+  @override
+  Future<ControlledPcmRead> openAt(int offset, PcmCancellation cancellation) =>
+      input.openAt(offset, cancellation);
   @override
   void close() {
     release();

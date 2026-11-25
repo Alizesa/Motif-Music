@@ -4,6 +4,7 @@ import 'package:mpv_audio_kit/mpv_audio_kit.dart';
 
 import 'audio_engine.dart';
 import 'controlled_pcm.dart';
+import 'controlled_encoded.dart';
 
 /// libmpv-backed audio engine used by the current cross-platform prototype.
 /// Keep this adapter isolated so the native binding can be replaced if device
@@ -12,7 +13,8 @@ final class MpvAudioEngine
     implements
         AudioEngine,
         ApplicationQueueAudioEngine,
-        ControlledPcmAudioEngine {
+        ControlledPcmAudioEngine,
+        ControlledEncodedAudioEngine {
   MpvAudioEngine({PlayerApi? player})
     : _player =
           player ??
@@ -33,6 +35,9 @@ final class MpvAudioEngine
   PcmCancellation? _pending;
   PcmCancellation? _controlledPending;
   _ControlledTrack? _controlled;
+  _EncodedTrack? _encoded;
+  Future<void>? _encodedHookReady;
+  StreamSubscription<MpvHookEvent>? _encodedHook;
   (_ControlledTrack, PcmCancellation)? _switchingSegment;
   bool _disposed = false;
   bool _applicationNavigation = false;
@@ -139,7 +144,11 @@ final class MpvAudioEngine
   @override
   Stream<String> get errors => Stream.multi((events) {
     final native = _player.stream.error.listen(
-      (error) => events.add(_controlled == null ? '$error' : '受控音频播放失败。'),
+      (error) => events.add(
+        _controlled == null && _encoded == null
+            ? '$error'
+            : '音频解码或读取失败，请换一个音源重试。',
+      ),
     );
     final controlled = _controlledErrors.stream.listen(
       events.add,
@@ -162,11 +171,13 @@ final class MpvAudioEngine
     }
     final pending = _begin();
     final retired = _takeControlled();
+    final retiredEncoded = _takeEncoded();
     try {
       await _serializeMedia(() async {
         // Stop the old PCM entry before the new load. PcmSource.abort()
         // can request playlist-next on the native player.
         await _stopRetired(retired);
+        await _stopEncoded(retiredEncoded);
         pending.check();
         await _preparePlayer();
         pending.check();
@@ -252,6 +263,152 @@ final class MpvAudioEngine
     }
   }
 
+  @override
+  Future<void> openControlledEncoded(
+    ControlledEncodedInput input, {
+    required String title,
+    String? artist,
+    String? album,
+    required String identity,
+    PcmCancellation? cancellation,
+    PcmCancellation? opening,
+  }) async {
+    final track = _EncodedTrack(input);
+    final operation = _begin();
+    final unlinkOpening = opening?.listen(operation.cancel);
+    final removeClosing = track.scope.listen(operation.cancel);
+    track.removeOwner = cancellation?.listen(() {
+      if (!identical(_encoded, track)) {
+        track.close();
+        return;
+      }
+      final retired = _takeEncoded();
+      unawaited(
+        _serializeMedia(() => _stopEncoded(retired)).catchError((Object _) {}),
+      );
+    });
+    var committed = false;
+    try {
+      if (_disposed) throw const PcmCancelled();
+      operation.check();
+      final server = await ControlledAudioServer.open(input, operation);
+      track.server = server;
+      await _serializeMedia(() async {
+        operation.check();
+        await _stopRetired(_takeControlled());
+        await _stopEncoded(_takeEncoded());
+        await _preparePlayer();
+        await _ensureEncodedHook();
+        operation.check();
+        _encoded = track;
+        await _player.setMediaSession(
+          MediaSession(
+            appName: 'Motif',
+            artwork: MediaSessionArtwork.none,
+            autoApplyPlaylistNavigation: !_applicationNavigation,
+          ),
+        );
+        await _player.open(
+          Media(
+            server.uri.toString(),
+            extras: {
+              'title': title,
+              'artist': ?artist,
+              'album': ?album,
+              'motifPcmIdentity': identity,
+            },
+            streamLavfOptions: {
+              'reconnect': '0',
+              'reconnect_on_network_error': '0',
+              'seekable': input.seekable ? '1' : '0',
+              'http_proxy': '',
+            },
+          ),
+          play: true,
+        );
+        operation.check();
+        committed = true;
+      });
+    } finally {
+      unlinkOpening?.call();
+      removeClosing();
+      _done(operation);
+      if (!committed) {
+        if (identical(_encoded, track)) {
+          final retired = _takeEncoded();
+          await _serializeMedia(() => _stopEncoded(retired));
+        } else {
+          track.close();
+        }
+      }
+    }
+  }
+
+  Future<void> _ensureEncodedHook() => _encodedHookReady ??= () async {
+    _encodedHook = _player.stream.hook.listen(
+      (event) => unawaited(_configureEncodedLoad(event)),
+    );
+    await _player.registerHook(Hook.load);
+  }();
+
+  Future<void> _configureEncodedLoad(MpvHookEvent event) async {
+    final loading = _encoded;
+    try {
+      final track = _encoded;
+      final path = await _player.getRawProperty('stream-open-filename');
+      if (track == null || path != track.server?.uri.toString()) return;
+      track.scope.check();
+      final options = {
+        'demuxer': 'lavf',
+        'demuxer-lavf-format': track.input.format.name,
+        'demuxer-lavf-o':
+            'protocol_whitelist=none,format_whitelist=${track.input.format.name}',
+        'access-references': 'no',
+        'load-unsafe-playlists': 'no',
+        'autoload-files': 'no',
+        'audio-file-auto': 'no',
+        'sub-auto': 'no',
+        'vid': 'no',
+        'audio-display': 'no',
+        'demuxer-max-bytes': '8388608',
+        'demuxer-max-back-bytes': '1048576',
+      };
+      for (final option in options.entries) {
+        track.scope.check();
+        await _player.setRawProperty(
+          'file-local-options/${option.key}',
+          option.value,
+        );
+      }
+    } catch (_) {
+      // A load must fail closed if any decoder restriction could not be set.
+      try {
+        await _player.setRawProperty(
+          'stream-open-filename',
+          'motif-blocked:audio',
+        );
+      } catch (_) {
+        /* Disposed. */
+      }
+      if (!_disposed && loading != null && !loading.scope.cancelled) {
+        _controlledErrors.add('音频解码初始化失败，请换一个音源重试。');
+      }
+    } finally {
+      await _player.continueHook(event.id);
+    }
+  }
+
+  _EncodedTrack? _takeEncoded() {
+    final old = _encoded;
+    _encoded = null;
+    old?.close();
+    return old;
+  }
+
+  Future<void> _stopEncoded(_EncodedTrack? track) async {
+    if (track != null) await _player.stop();
+  }
+
   PcmCancellation _begin() {
     _pending?.cancel();
     return _pending = PcmCancellation();
@@ -298,6 +455,7 @@ final class MpvAudioEngine
           throw const PcmCancelled();
         }
         await _preparePlayer();
+        await _stopEncoded(_takeEncoded());
         operation.check();
         final play = replace || _player.state.playback.playWhenReady;
         final old = _controlled;
@@ -477,6 +635,9 @@ final class MpvAudioEngine
   Future<void> seek(Duration position) async {
     final track = _controlled;
     if (_disposed) throw const PcmCancelled();
+    if (_encoded?.input.seekable == false) {
+      throw StateError('当前音频仅支持顺序播放。');
+    }
     if (track == null) return _player.seek(position);
     if (!track.input.seekable || track.finished) {
       throw StateError('当前测试音频无法跳转，请重新播放。');
@@ -537,15 +698,33 @@ final class MpvAudioEngine
     _disposed = true;
     _pending?.cancel();
     final active = _takeControlled();
+    _takeEncoded();
     try {
       await _serializeMedia(() async {
         await _player.dispose();
+        await _encodedHook?.cancel();
         active?.segment?.source.abort();
       });
     } finally {
       await _controlledErrors.close();
       await _mediaChange.close();
     }
+  }
+}
+
+final class _EncodedTrack {
+  _EncodedTrack(this.input);
+  final ControlledEncodedInput input;
+  final scope = PcmCancellation();
+  ControlledAudioServer? server;
+  void Function()? removeOwner;
+  void close() {
+    if (scope.cancelled) return;
+    removeOwner?.call();
+    removeOwner = null;
+    scope.cancel();
+    server?.close();
+    input.close();
   }
 }
 

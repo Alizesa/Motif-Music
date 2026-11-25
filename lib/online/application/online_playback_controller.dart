@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../audio/audio_engine.dart';
 import '../../audio/controlled_pcm.dart';
+import '../../audio/controlled_encoded.dart';
 import '../../library/domain/library_models.dart';
 import '../../library/domain/library_playback_error.dart';
 import '../../settings/online_playback_settings_controller.dart';
@@ -178,21 +179,36 @@ class OnlinePlaybackController extends ChangeNotifier {
         if (!isCurrent()) return;
         if (managed case final stream?) {
           final player = engine;
-          if (player is! ControlledPcmAudioEngine) {
-            throw const OnlineException(OnlineErrorKind.unsupported);
-          }
-          final controlled = player as ControlledPcmAudioEngine;
           stream.owner.check();
-          ownedByEngine = true;
-          await controlled.openControlledPcm(
-            stream.input,
-            title: track.title,
-            artist: track.artists.join('、'),
-            album: track.album,
-            identity: resolved.uri,
-            cancellation: stream.owner,
-            opening: intent,
-          );
+          final input = stream.input;
+          if (input is ControlledPcmInput &&
+              player is ControlledPcmAudioEngine) {
+            ownedByEngine = true;
+            await (player as ControlledPcmAudioEngine).openControlledPcm(
+              input,
+              title: track.title,
+              artist: track.artists.join('、'),
+              album: track.album,
+              identity: resolved.uri,
+              cancellation: stream.owner,
+              opening: intent,
+            );
+          } else if (input is ControlledEncodedInput &&
+              player is ControlledEncodedAudioEngine) {
+            ownedByEngine = true;
+            await (player as ControlledEncodedAudioEngine)
+                .openControlledEncoded(
+                  input,
+                  title: track.title,
+                  artist: track.artists.join('、'),
+                  album: track.album,
+                  identity: resolved.uri,
+                  cancellation: stream.owner,
+                  opening: intent,
+                );
+          } else {
+            throw const OnlineException(OnlineErrorKind.unsupportedFormat);
+          }
           stream.owner.check();
         } else {
           await engine.openQueue([

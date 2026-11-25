@@ -84,6 +84,9 @@ class MusicSourceRegistry {
           !{
             OnlineErrorKind.unavailable,
             OnlineErrorKind.unsupported,
+            OnlineErrorKind.unsupportedFormat,
+            OnlineErrorKind.unsupportedQuality,
+            OnlineErrorKind.unsupportedRequest,
             OnlineErrorKind.transport,
           }.contains(error.kind)) {
         rethrow;

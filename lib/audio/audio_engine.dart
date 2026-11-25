@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'controlled_pcm.dart';
+import 'controlled_encoded.dart';
 
 @immutable
 class AudioTrack {
@@ -68,6 +69,18 @@ abstract interface class ControlledPcmAudioEngine {
     String? artist,
     String? album,
     String? identity,
+    PcmCancellation? cancellation,
+    PcmCancellation? opening,
+  });
+}
+
+abstract interface class ControlledEncodedAudioEngine {
+  Future<void> openControlledEncoded(
+    ControlledEncodedInput input, {
+    required String title,
+    String? artist,
+    String? album,
+    required String identity,
     PcmCancellation? cancellation,
     PcmCancellation? opening,
   });
