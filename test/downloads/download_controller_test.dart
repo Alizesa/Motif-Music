@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/controlled_pcm.dart';
 import 'package:motif/downloads/download_controller.dart';
@@ -82,20 +83,44 @@ void main() {
   );
 
   test(
-    'retry re-resolves and uses a fresh file, without automatic retry',
+    'retry reuses the failed task, clears progress and uses a fresh file',
     () async {
       await controller.chooseDirectory();
       source.fail = true;
       await controller.start(track, 'test', OnlineQuality.standard);
       final failed = controller.tasks.single;
       expect(failed.status, DownloadStatus.failed);
+      expect(failed.received, 3);
+      expect(failed.total, 8);
+      expect(failed.error, isNotNull);
       expect(source.calls, 1);
       expect(destination.writers.single.aborted, isTrue);
+
+      destination.selected = DownloadDirectory(
+        Uri.parse('file:///replacement'),
+        'Replacement',
+      );
+      await controller.chooseDirectory();
       source.fail = false;
-      await controller.retry(failed);
+      source.gate = Completer<void>();
+      final retrying = controller.retry(failed);
+      expect(controller.tasks, [same(failed)]);
+      expect(failed.status, DownloadStatus.resolving);
+      expect(failed.received, 0);
+      expect(failed.total, isNull);
+      expect(failed.error, isNull);
+      expect(failed.receipt, isNull);
+      await controller.retry(failed); // A second tap cannot start an attempt.
+      source.gate!.complete();
+      await retrying;
       expect(source.calls, 2);
-      expect(controller.tasks.first.status, DownloadStatus.completed);
+      expect(controller.tasks, [same(failed)]);
+      expect(failed.status, DownloadStatus.completed);
+      expect(failed.directory, same(destination.selected));
+      expect(destination.createdIn.last, same(destination.selected));
       expect(destination.writers.last.bytes.length, 8);
+      await controller.retry(failed);
+      expect(source.calls, 2, reason: 'a completed task cannot be retried');
     },
   );
 
@@ -103,6 +128,7 @@ void main() {
     await controller.chooseDirectory();
     destination.creation = Completer<void>();
     final running = controller.start(track, 'test', OnlineQuality.standard);
+    await destination.creating.future;
     controller.cancel();
     expect(controller.busy, isTrue);
     destination.creation!.complete();
@@ -110,6 +136,22 @@ void main() {
     expect(destination.writers.single.aborted, isTrue);
     expect(source.calls, 0);
     expect(controller.tasks.single.status, DownloadStatus.cancelled);
+  });
+
+  test('an Android directory failure uses a safe save error without resolving the source', () async {
+    await controller.chooseDirectory();
+    destination.createFailure = PlatformException(
+      code: 'download_io',
+      message: 'private content URI',
+    );
+    await controller.start(track, 'test', OnlineQuality.standard);
+    expect(controller.tasks.single.status, DownloadStatus.failed);
+    expect(controller.tasks.single.error, contains('保存目录权限'));
+    expect(
+      controller.tasks.single.error,
+      isNot(contains('private content URI')),
+    );
+    expect(source.calls, 0);
   });
 
   test('commit failure removes the incomplete output', () async {
@@ -182,8 +224,11 @@ class _Source implements PlaybackUrlResolver, TrackDownloadSource {
     if (!started.isCompleted) started.complete();
     if (gate != null) await cancellation.until(gate!.future);
     cancellation.check();
-    if (fail) throw const OnlineException(OnlineErrorKind.transport);
     onTotal(8);
+    if (fail) {
+      await write(Uint8List.fromList([7, 7, 7]));
+      throw const OnlineException(OnlineErrorKind.transport);
+    }
     await write(Uint8List.fromList(List.filled(8, 7)));
     return 'mp3';
   }
@@ -197,15 +242,24 @@ class _Source implements PlaybackUrlResolver, TrackDownloadSource {
 
 class _Destination implements DownloadDestination {
   final writers = <_Writer>[];
+  final createdIn = <DownloadDirectory>[];
+  DownloadDirectory selected = DownloadDirectory(
+    Uri.parse('file:///chosen'),
+    'Chosen',
+  );
+  final creating = Completer<void>();
   Completer<void>? creation;
+  Object? createFailure;
   bool failCommit = false;
   @override
-  Future<DownloadDirectory?> chooseDirectory() async =>
-      DownloadDirectory(Uri.parse('file:///chosen'), 'Chosen');
+  Future<DownloadDirectory?> chooseDirectory() async => selected;
   @override
   Future<DownloadWriter> create(DownloadDirectory directory) async {
+    if (!creating.isCompleted) creating.complete();
+    if (createFailure case final failure?) throw failure;
     if (creation != null) await creation!.future;
     final writer = _Writer(failCommit);
+    createdIn.add(directory);
     writers.add(writer);
     return writer;
   }

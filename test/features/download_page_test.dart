@@ -97,11 +97,14 @@ void main() {
       await tester.tap(find.text('取消下载'));
       await tester.pumpAndSettle();
       expect(find.text('已取消'), findsOneWidget);
+      final cancelled = controller.tasks.single;
       expect(destination.aborted, 1);
       source.gate = null;
       await tester.tap(find.text('重新下载'));
       await tester.pumpAndSettle();
       expect(find.text('已完成'), findsOneWidget);
+      expect(find.text('已取消'), findsNothing);
+      expect(controller.tasks, [same(cancelled)]);
       expect(source.transfers, 2);
     },
   );

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/controlled_pcm.dart';
+import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/lx/fixture/lx_fixture_wave.dart';
 import 'package:motif/online/lx/lx_download.dart';
 
@@ -51,6 +52,43 @@ void main() {
     expect(transport.opens.length, 1);
   });
 
+  test('accepts a complete WAV without range headers or an ETag', () async {
+    final bytes = WaveFixtureTransport().bytes;
+    final transport = _Transport(bytes, bytes.length, type: 'audio/wav');
+    final saved = BytesBuilder();
+    expect(
+      await downloadLxAudio(
+        transport,
+        PcmCancellation(),
+        (chunk) async => saved.add(chunk),
+        (length) => expect(length, bytes.length),
+      ),
+      'wav',
+    );
+    expect(saved.takeBytes(), bytes);
+    expect(transport.reader.closed, isTrue);
+  });
+
+  test('reports media HTTP status without writing an error response', () async {
+    for (final status in [403, 404, 429, 503]) {
+      final transport = EncodedFixtureTransport(mp3Fixture())
+        ..fault = '$status';
+      await expectLater(
+        downloadLxAudio(transport, PcmCancellation(), (_) async {
+          fail('An HTTP error body must not be written');
+        }, (_) => fail('No audio length on an error response')),
+        throwsA(
+          isA<OnlineException>().having(
+            (error) => error.toString(),
+            'safe HTTP status',
+            contains('HTTP $status'),
+          ),
+        ),
+      );
+      expect(transport.readers.single.closed, isTrue);
+    }
+  });
+
   test(
     'rejects truncated and oversized bodies instead of claiming completion',
     () async {
@@ -87,6 +125,30 @@ void main() {
     expect(transport.reader.closed, isTrue);
   });
 
+  test(
+    'cancellation during the probe waits for an in-flight write to settle',
+    () async {
+      final transport = EncodedFixtureTransport(mp3Fixture());
+      final work = PcmCancellation();
+      final entered = Completer<void>();
+      final writing = Completer<void>();
+      var finished = false;
+      final download = downloadLxAudio(transport, work, (_) {
+        entered.complete();
+        return writing.future;
+      }, (_) {}).whenComplete(() => finished = true);
+      final result = expectLater(download, throwsA(isA<PcmCancelled>()));
+      await entered.future;
+      work.cancel();
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.readers.single.closed, isTrue);
+      expect(finished, isFalse, reason: 'cleanup must wait for the write');
+      writing.complete();
+      await result;
+      expect(finished, isTrue);
+    },
+  );
+
   test('a disk write failure stops reads and releases the body', () async {
     final transport = EncodedFixtureTransport(mp3Fixture());
     await expectLater(
@@ -111,9 +173,14 @@ void main() {
 }
 
 class _Transport implements FixtureRangeTransport {
-  _Transport(Uint8List bytes, this.length, {bool block = false})
-    : reader = _Body(bytes, block);
+  _Transport(
+    Uint8List bytes,
+    this.length, {
+    bool block = false,
+    this.type = 'audio/mpeg',
+  }) : reader = _Body(bytes, block);
   final int length;
+  final String type;
   final _Body reader;
   @override
   Future<FixtureRangeResponse> open(
@@ -124,7 +191,7 @@ class _Transport implements FixtureRangeTransport {
     status: 200,
     headers: {
       'content-length': ['$length'],
-      'content-type': ['audio/mpeg'],
+      'content-type': [type],
     },
     body: reader,
   );

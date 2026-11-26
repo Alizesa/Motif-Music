@@ -14,6 +14,7 @@ import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/domain/playback_source.dart';
 import 'package:motif/online/lx/lx_network.dart';
+import 'package:motif/online/lx/lx_download.dart';
 import 'package:motif/online/lx/lx_request_error.dart';
 import 'package:motif/online/lx/lx_audio_media.dart';
 import 'package:motif/online/lx/fixture/lx_fixture_wave.dart';
@@ -63,6 +64,11 @@ void main() {
   var useLastCandidate = false;
   var transientFailures = 0;
   var noResult = false;
+  var scriptError = false;
+  var requireDownloadMetadata = false;
+  late List<(String, int)> catalogRequests;
+  late List<Map> eventTracks;
+  late Future<QqTrack> Function() catalogReply;
   ControlledAudioInput? mediaInput;
   late List<Uri> downloaded;
   Completer<void>? downloadGate;
@@ -86,6 +92,11 @@ void main() {
     useLastCandidate = false;
     transientFailures = 0;
     noResult = false;
+    scriptError = false;
+    requireDownloadMetadata = false;
+    catalogRequests = [];
+    eventTracks = [];
+    catalogReply = () async => track;
     mediaInput = null;
     mediaUrl = 'https://$_media/track.wav';
     requestAttempts = 1;
@@ -100,6 +111,10 @@ void main() {
     manager = LxSourceManager(
       store: store,
       registry: registry,
+      downloadDetail: (mid, {required songType}) {
+        catalogRequests.add((mid, songType));
+        return catalogReply();
+      },
       run:
           (
             bytes, {
@@ -126,7 +141,16 @@ void main() {
             expect(event['action'], 'musicUrl');
             final info = event['info']! as Map<String, Object?>;
             expect(info['type'], '128k');
-            expect((info['musicInfo']! as Map)['songmid'], 'song');
+            final music = info['musicInfo']! as Map;
+            expect(music['songmid'], 'song');
+            eventTracks.add(music);
+            if (scriptError ||
+                (requireDownloadMetadata &&
+                    (music['strMediaMid'] != 'media' ||
+                        music['interval'] != '03:00' ||
+                        !(music['_types'] as Map).containsKey('128k')))) {
+              return {'error': 'script'};
+            }
             if (paused case final gate?) {
               started.complete();
               await cancellation.until(gate.future);
@@ -232,10 +256,182 @@ void main() {
     );
     expect(bytes.takeBytes(), [1, 2, 3, 4]);
     expect(downloaded, [Uri.parse(mediaUrl)]);
+    expect(catalogRequests, [('song', 0)]);
     expect(fetched.length, 1);
     expect(opened, isEmpty);
     expect(qq.calls, 0);
   });
+
+  Future<String> transfer(
+    String id, {
+    QqTrack? selected,
+    OnlineQuality quality = OnlineQuality.standard,
+  }) => registry.download(
+    id,
+    selected ?? track,
+    quality,
+    cancellation: PcmCancellation(),
+    write: (_) async {},
+    onTotal: (_) {},
+  );
+
+  test(
+    'download supplies missing public metadata without mutating the song',
+    () async {
+      final id = await enable();
+      requireDownloadMetadata = true;
+      final sparse = QqTrack(
+        mid: track.mid,
+        title: 'List title',
+        artists: track.artists,
+        album: track.album,
+        songId: 42,
+        songType: 7,
+        qualitySizes: {OnlineQuality.high: 123},
+      );
+      catalogReply = () async => QqTrack(
+        mid: track.mid,
+        title: 'Canonical title',
+        artists: ['Canonical artist'],
+        album: 'Canonical album',
+        songId: 42,
+        mediaMid: 'media',
+        durationMs: 180000,
+        qualitySizes: {OnlineQuality.standard: 1024, OnlineQuality.high: 98765},
+      );
+      expect(await transfer(id, selected: sparse), 'mp3');
+      expect(catalogRequests, [('song', 7)]);
+      expect(eventTracks.single, containsPair('name', 'List title'));
+      expect(eventTracks.single['_types'], {
+        '128k': {'size': '1.00K'},
+        '320k': {'size': '0.12K'},
+      });
+      expect(sparse.mediaMid, isNull);
+      expect(sparse.qualitySizes, {OnlineQuality.high: 123});
+      expect(handled, 1);
+      expect(fetched, hasLength(1));
+      expect(downloaded, hasLength(1));
+      expect(opened, isEmpty);
+      expect(qq.calls, 0);
+    },
+  );
+
+  test('a complete download row needs no catalog lookup', () async {
+    final id = await enable();
+    requireDownloadMetadata = true;
+    final complete = QqTrack(
+      mid: track.mid,
+      title: track.title,
+      artists: track.artists,
+      album: track.album,
+      mediaMid: 'media',
+      durationMs: 180000,
+      qualitySizes: {OnlineQuality.standard: 1024},
+    );
+    await expectLater(
+      transfer(id, selected: complete, quality: OnlineQuality.lossless),
+      throwsA(
+        isA<OnlineException>().having(
+          (error) => error.kind,
+          'kind',
+          OnlineErrorKind.unsupportedQuality,
+        ),
+      ),
+    );
+    expect(await transfer(id, selected: complete), 'mp3');
+    expect(catalogRequests, isEmpty);
+    expect(handled, 1);
+  });
+
+  for (final mismatched in [false, true]) {
+    test(
+      'download keeps the sparse row when the catalog ${mismatched ? 'returns a different song' : 'fails'}',
+      () async {
+        final id = await enable();
+        catalogReply = mismatched
+            ? () async => QqTrack(
+                mid: track.mid,
+                title: 'Wrong song',
+                artists: [],
+                album: '',
+                songId: 99,
+                mediaMid: 'wrong',
+              )
+            : () async =>
+                  throw const OnlineException(OnlineErrorKind.transport);
+        final sparse = QqTrack(
+          mid: track.mid,
+          title: track.title,
+          artists: track.artists,
+          album: track.album,
+          songId: 42,
+        );
+        expect(await transfer(id, selected: sparse), 'mp3');
+        expect(catalogRequests, [('song', 0)]);
+        expect(eventTracks.single['strMediaMid'], isNull);
+        expect(eventTracks.single['songId'], 42);
+        expect(handled, 1);
+      },
+    );
+  }
+
+  test(
+    'a revoked download cannot start the script after a late catalog reply',
+    () async {
+      final id = await enable();
+      final started = Completer<void>();
+      final pending = Completer<QqTrack>();
+      catalogReply = () {
+        started.complete();
+        return pending.future;
+      };
+      final result = expectLater(
+        transfer(id),
+        throwsA(
+          isA<OnlineException>().having(
+            (error) => error.kind,
+            'kind',
+            OnlineErrorKind.closed,
+          ),
+        ),
+      );
+      await started.future;
+      expect(await manager.configure(id, enable: false), isTrue);
+      await result;
+      pending.complete(track);
+      await Future<void>.delayed(Duration.zero);
+      expect(handled, 0);
+      expect(downloaded, isEmpty);
+    },
+  );
+
+  test(
+    'script failure identifies address resolution, not an HTTP or disk failure',
+    () async {
+      final id = await enable();
+      scriptError = true;
+      await expectLater(
+        transfer(id),
+        throwsA(
+          isA<OnlineException>()
+              .having(
+                (error) => error.kind,
+                'kind',
+                OnlineErrorKind.operationRejected,
+              )
+              .having(
+                (error) => error.toString(),
+                'stage',
+                contains('获取下载地址失败'),
+              ),
+        ),
+      );
+      expect(handled, 1);
+      expect(downloaded, isEmpty);
+      expect(opened, isEmpty);
+      expect(qq.calls, 0);
+    },
+  );
 
   test('disabling a source cancels an active download lease', () async {
     final id = await enable();
@@ -568,6 +764,7 @@ void main() {
       'candidate3.example.test',
     ]);
     expect(opened.single.host, 'new-cdn.example.test');
+    expect(catalogRequests, isEmpty, reason: 'playback path is unchanged');
     stream.input.close();
   });
 
@@ -687,6 +884,8 @@ void main() {
         owner,
         open: (uri, headers, scope) async {
           scope.check();
+          expect(headers['range'], 'bytes=0-');
+          expect(headers, isNot(contains('user-agent')));
           calls.add(uri);
           final reader = _Read();
           readers.add(reader);
@@ -711,6 +910,93 @@ void main() {
       response.body.close();
       expect(readers.last.closed, isTrue);
       owner.cancel();
+    },
+  );
+
+  test('a download uses a full GET with a fixed media User-Agent on each checked hop', () async {
+    final calls = <Uri>[];
+    final bytes = mp3Fixture();
+    final reader = EncodedFixtureRead(bytes, 0);
+    final redirect = _Read();
+    final work = PcmCancellation();
+    final transport = LxMediaTransport.download(
+      Uri.https(_media, '/song'),
+      work,
+      open: (uri, headers, _) async {
+        calls.add(uri);
+        if (headers.containsKey('range') ||
+            !headers.containsKey('user-agent')) {
+          return FixtureRangeResponse(status: 403, headers: {}, body: _Read());
+        }
+        expect(headers.keys, unorderedEquals(['accept', 'user-agent']));
+        expect(headers['user-agent'], contains('Mobile Safari'));
+        if (calls.length == 1) {
+          return FixtureRangeResponse(
+            status: 302,
+            headers: {
+              'location': ['https://other-cdn.example.test/song'],
+            },
+            body: redirect,
+          );
+        }
+        return FixtureRangeResponse(
+          status: 200,
+          headers: {
+            'content-length': ['${bytes.length}'],
+            'content-type': ['audio/mpeg'],
+          },
+          body: reader,
+        );
+      },
+    );
+    final saved = BytesBuilder();
+    expect(
+      await downloadLxAudio(
+        transport,
+        work,
+        (chunk) async => saved.add(chunk),
+        (_) {},
+      ),
+      'mp3',
+    );
+    expect(calls.map((uri) => uri.host), [_media, 'other-cdn.example.test']);
+    expect(saved.takeBytes(), bytes);
+    expect(redirect.closed, isTrue);
+    expect(reader.closed, isTrue);
+  });
+
+  test(
+    'a download redirect cannot dial a private or non-HTTPS target',
+    () async {
+      final first = _Read();
+      var calls = 0;
+      final work = PcmCancellation();
+      final transport = LxMediaTransport.download(
+        Uri.https(_media, '/song'),
+        work,
+        open: (_, _, _) async {
+          calls++;
+          return FixtureRangeResponse(
+            status: 302,
+            headers: {
+              'location': ['https://127.0.0.1/song'],
+            },
+            body: first,
+          );
+        },
+      );
+      await expectLater(
+        downloadLxAudio(transport, work, (_) async {}, (_) {}),
+        throwsA(
+          isA<LxRequestException>().having(
+            (error) => error.reason,
+            'reason',
+            LxRequestFailure.mediaAddress,
+          ),
+        ),
+      );
+      expect(calls, 1);
+      expect(first.closed, isTrue);
     },
   );
 

@@ -37,6 +37,11 @@ typedef LxOpen = Future<ControlledAudioInput> Function(
   PcmCancellation,
 );
 
+typedef LxDownloadDetail = Future<QqTrack> Function(
+  String mid, {
+  required int songType,
+});
+
 typedef LxDownload = Future<String> Function(
   Uri,
   PcmCancellation,
@@ -52,6 +57,7 @@ final class LxSourceManager extends ChangeNotifier {
     LxFetch? fetch,
     LxOpen? open,
     LxDownload? download,
+    this._downloadDetail,
   }) : _run = run ?? const LxNativeWorker().run,
        _fetch = fetch ?? const LxHttpsTransport().api,
        _open = open ?? _openAudio,
@@ -63,6 +69,7 @@ final class LxSourceManager extends ChangeNotifier {
   final LxFetch _fetch;
   final LxOpen _open;
   final LxDownload _download;
+  final LxDownloadDetail? _downloadDetail;
   final _closing = PcmCancellation();
   Future<void>? _initializing;
   List<LxStoredSource> _sources = const [];
@@ -238,7 +245,15 @@ final class LxSourceManager extends ChangeNotifier {
   void _register(LxStoredSource source) => registry.registerManaged(
     MusicSourceRegistration(
       name: source.name,
-      resolver: _ManagedLxSource(source, store, _run, _fetch, _open, _download),
+      resolver: _ManagedLxSource(
+        source,
+        store,
+        _run,
+        _fetch,
+        _open,
+        _download,
+        _downloadDetail,
+      ),
     ),
   );
 
@@ -267,7 +282,8 @@ Future<String> _downloadAudio(
   PcmCancellation work,
   DownloadWrite write,
   void Function(int) onTotal,
-) => downloadLxAudio(LxMediaTransport(uri, work), work, write, onTotal);
+) =>
+    downloadLxAudio(LxMediaTransport.download(uri, work), work, write, onTotal);
 
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
@@ -283,6 +299,7 @@ final class _ManagedLxSource
     this.fetch,
     this.open,
     this.download,
+    this.downloadDetail,
   );
 
   final LxStoredSource source;
@@ -291,6 +308,7 @@ final class _ManagedLxSource
   final LxFetch fetch;
   final LxOpen open;
   final LxDownload download;
+  final LxDownloadDetail? downloadDetail;
   final _lifetime = PcmCancellation();
   static int _nextIdentity = 0;
 
@@ -342,6 +360,55 @@ final class _ManagedLxSource
     });
   }
 
+  Future<QqTrack> _prepareDownloadTrack(
+    QqTrack track,
+    OnlineQuality quality,
+    PcmCancellation work,
+  ) async {
+    final detail = downloadDetail;
+    if (detail == null ||
+        (track.mediaMid != null &&
+            track.durationMs != null &&
+            track.qualitySizes.containsKey(quality))) {
+      return track;
+    }
+    work.check();
+    try {
+      // The public client owns caching, coalescing and rate limits. Do not let
+      // a queued catalog lookup indefinitely delay or block script resolution.
+      final extra = await work.until(
+        detail(
+          track.mid,
+          songType: track.songType,
+        ).timeout(const Duration(seconds: 5)),
+      );
+      work.check();
+      if (extra.mid != track.mid ||
+          (track.songId != null &&
+              extra.songId != null &&
+              extra.songId != track.songId)) {
+        return track;
+      }
+      return QqTrack(
+        mid: track.mid,
+        title: track.title,
+        artists: track.artists,
+        album: track.album,
+        songType: track.songType,
+        songId: track.songId ?? extra.songId,
+        albumMid: track.albumMid ?? extra.albumMid,
+        mediaMid: track.mediaMid ?? extra.mediaMid,
+        durationMs: track.durationMs ?? extra.durationMs,
+        qualitySizes: {...extra.qualitySizes, ...track.qualitySizes},
+      );
+    } on OnlineException {
+      // Some scripts can resolve the original sparse catalog row directly.
+      return track;
+    } on TimeoutException {
+      return track;
+    }
+  }
+
   @override
   Future<String> transfer(
     QqTrack track,
@@ -350,21 +417,38 @@ final class _ManagedLxSource
     required DownloadWrite write,
     required void Function(int) onTotal,
   }) async {
+    if (!source.qualities.contains(quality)) {
+      throw const OnlineException(OnlineErrorKind.unsupportedQuality);
+    }
     final work = PcmCancellation();
     final release = _lifetime.listen(work.cancel);
     final detach = cancellation.listen(work.cancel);
     try {
-      final uri = await work.until(_address(track, quality, work));
+      final prepared = await _prepareDownloadTrack(track, quality, work);
+      final Uri uri;
+      try {
+        // The worker observes cancellation and reaps its process before returning.
+        uri = await _address(prepared, quality, work);
+      } on OnlineException catch (error) {
+        if (error is LxRequestException ||
+            (error.kind != OnlineErrorKind.unavailable &&
+                error.kind != OnlineErrorKind.operationRejected)) {
+          rethrow;
+        }
+        throw _DownloadAddressException(error.kind);
+      }
       return await download(uri, work, write, onTotal);
     } on PcmCancelled {
       if (cancellation.cancelled) rethrow;
       throw const OnlineException(OnlineErrorKind.closed);
     } on FixtureMediaException catch (error) {
-      throw OnlineException(
-        error.kind == FixtureMediaFailure.format
-            ? OnlineErrorKind.unsupportedFormat
-            : OnlineErrorKind.transport,
-      );
+      throw OnlineException(switch (error.kind) {
+        FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
+        FixtureMediaFailure.denied => OnlineErrorKind.rejected,
+        FixtureMediaFailure.range => OnlineErrorKind.malformedResponse,
+        FixtureMediaFailure.transport ||
+        FixtureMediaFailure.truncated => OnlineErrorKind.transport,
+      });
     } finally {
       work.cancel();
       release();
@@ -446,6 +530,15 @@ final class _ManagedLxSource
 
   @override
   void close() => _lifetime.cancel();
+}
+
+final class _DownloadAddressException extends OnlineException {
+  const _DownloadAddressException(super.kind);
+
+  @override
+  String toString() => kind == OnlineErrorKind.unavailable
+      ? '所选音源未提供这首歌在该档位的下载地址。可换音源或音质。'
+      : '获取下载地址失败：所选音源未能完成取址，请稍后重试。';
 }
 
 final class _LxRequestBudget {

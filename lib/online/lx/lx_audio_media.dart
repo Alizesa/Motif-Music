@@ -13,8 +13,9 @@ const _rangeError = FixtureMediaException(FixtureMediaFailure.range);
 /// Detect actual bytes, never a URL suffix or the requested quality tier.
 Future<ControlledAudioInput> openLxAudio(
   FixtureRangeTransport transport,
-  PcmCancellation cancellation,
-) async {
+  PcmCancellation cancellation, {
+  bool sequential = false,
+}) async {
   final first = await cancellation.until(
     transport.open(0, null, cancellation),
     discard: (late) => late.body.close(),
@@ -40,6 +41,7 @@ Future<ControlledAudioInput> openLxAudio(
           ),
         ),
         cancellation,
+        sequential: sequential,
       );
     }
     final ControlledAudioFormat format;

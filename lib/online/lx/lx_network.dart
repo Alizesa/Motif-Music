@@ -450,10 +450,21 @@ Future<FixtureRangeResponse> _openMediaRange(
 
 final class LxMediaTransport implements FixtureRangeTransport {
   LxMediaTransport(this.uri, this.owner, {LxMediaOpen? open})
-    : _open = open ?? _openMediaRange;
+    : _wholeFile = false,
+      _open = open ?? _openMediaRange;
+
+  /// Fresh downloads use a complete GET, not a playback seek/probe request.
+  LxMediaTransport.download(this.uri, this.owner, {LxMediaOpen? open})
+    : _wholeFile = true,
+      _open = open ?? _openMediaRange;
+
   final Uri uri;
   final PcmCancellation owner;
+  final bool _wholeFile;
   final LxMediaOpen _open;
+  static const _downloadUserAgent =
+      'Mozilla/5.0 (Linux; Android 10; Pixel 3) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/79.0.3945.79 Mobile Safari/537.36';
   Uri? _representation;
 
   @override
@@ -462,6 +473,10 @@ final class LxMediaTransport implements FixtureRangeTransport {
     String? validator,
     PcmCancellation cancellation,
   ) async {
+    cancellation.check();
+    if (_wholeFile && (offset != 0 || validator != null)) {
+      throw const FixtureMediaException(FixtureMediaFailure.range);
+    }
     final scope = PcmCancellation();
     final unlistenOwner = owner.listen(scope.cancel);
     final unlisten = cancellation.listen(scope.cancel);
@@ -475,11 +490,16 @@ final class LxMediaTransport implements FixtureRangeTransport {
         final reply = await _open(next, {
           'accept':
               'audio/mpeg, audio/flac, audio/wav, application/octet-stream',
-          'range': 'bytes=$offset-',
-          'if-range': ?validator,
+          if (_wholeFile) 'user-agent': _downloadUserAgent,
+          if (!_wholeFile) ...{
+            'range': 'bytes=$offset-',
+            'if-range': ?validator,
+          },
         }, scope);
         if (!const {301, 302, 303, 307, 308}.contains(reply.status)) {
-          if (offset == 0 && const {200, 206}.contains(reply.status)) {
+          if (!_wholeFile &&
+              offset == 0 &&
+              const {200, 206}.contains(reply.status)) {
             _representation = next;
           }
           return FixtureRangeResponse(

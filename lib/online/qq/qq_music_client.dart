@@ -77,11 +77,16 @@ class QqMusicClient implements PlaybackUrlResolver {
   }
 
   Future<QqTrack> detail(String mid, {int songType = 0}) {
-    if (!validQqMid(mid) || songType < 0) {
-      throw ArgumentError('Invalid song identity');
-    }
     if (accountApi?.sessions.snapshot.credential != null) {
       return accountApi!.detail(mid, songType: songType);
+    }
+    return publicDetail(mid, songType: songType);
+  }
+
+  /// Catalog metadata only. Downloads must not use account cookies or tickets.
+  Future<QqTrack> publicDetail(String mid, {int songType = 0}) {
+    if (!validQqMid(mid) || songType < 0) {
+      throw ArgumentError('Invalid song identity');
     }
     return _coordinator.run(
       jsonEncode(['detail', mid, songType]),

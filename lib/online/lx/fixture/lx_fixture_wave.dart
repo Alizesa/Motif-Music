@@ -45,7 +45,7 @@ final class FixtureWave implements ControlledPcmInput {
 
   final FixtureRangeTransport _transport;
   final _WaveDescription _description;
-  final String _tag;
+  final String? _tag;
   ControlledPcmRead? _initial;
   final _readers = <_WaveRead>{};
   bool _closed = false;
@@ -64,8 +64,9 @@ final class FixtureWave implements ControlledPcmInput {
   /// The transport owns the URL and checks its destination on every open.
   static Future<FixtureWave> openManaged(
     FixtureRangeTransport transport,
-    PcmCancellation cancellation,
-  ) async {
+    PcmCancellation cancellation, {
+    bool sequential = false,
+  }) async {
     cancellation.check();
     final response = await cancellation.until(
       transport.open(0, null, cancellation),
@@ -73,7 +74,7 @@ final class FixtureWave implements ControlledPcmInput {
     );
     try {
       cancellation.check();
-      final envelope = _envelope(response, 0);
+      final envelope = _envelope(response, 0, sequential: sequential);
       final prefix = Uint8List(_headerBytes);
       var filled = 0;
       while (filled < _headerBytes) {
@@ -102,7 +103,7 @@ final class FixtureWave implements ControlledPcmInput {
   @override
   int get frames => (_description.size - _headerBytes) ~/ (channels * 2);
   @override
-  bool get seekable => !_closed;
+  bool get seekable => !_closed && _tag != null;
 
   @override
   Future<ControlledPcmRead> openAt(
@@ -119,13 +120,17 @@ final class FixtureWave implements ControlledPcmInput {
     _initial = null;
     if (body == null || frame != 0) {
       body?.close();
+      final tag = _tag;
+      if (tag == null) {
+        throw const FixtureMediaException(FixtureMediaFailure.range);
+      }
       final response = await cancellation.until(
-        _transport.open(offset, _tag, cancellation),
+        _transport.open(offset, tag, cancellation),
         discard: (late) => late.body.close(),
       );
       try {
         final envelope = _envelope(response, offset);
-        if (envelope.size != _description.size || envelope.tag != _tag) {
+        if (envelope.size != _description.size || envelope.tag != tag) {
           throw const FixtureMediaException(FixtureMediaFailure.range);
         }
         cancellation.check();
@@ -153,7 +158,11 @@ final class FixtureWave implements ControlledPcmInput {
   }
 }
 
-({int size, String tag}) _envelope(FixtureRangeResponse response, int offset) {
+({int size, String? tag}) _envelope(
+  FixtureRangeResponse response,
+  int offset, {
+  bool sequential = false,
+}) {
   String? single(String name) {
     final values = response.headers[name];
     if (values == null) return null;
@@ -163,29 +172,36 @@ final class FixtureWave implements ControlledPcmInput {
     return values.single;
   }
 
-  final range = RegExp(r'^bytes (\d{1,10})-(\d{1,10})/(\d{1,10})$')
-      .firstMatch(single('content-range') ?? '');
+  final rawRange = single('content-range');
   final length = int.tryParse(single('content-length') ?? '');
   final encoding = single('content-encoding');
   final tag = single('etag');
-  if (response.status != 206 ||
-      range == null ||
-      length == null ||
+  if (length == null ||
       (encoding != null && encoding.toLowerCase() != 'identity') ||
       response.headers.containsKey('transfer-encoding') ||
-      tag == null ||
-      !RegExp(r'^"[\x21\x23-\x7e]{1,126}"$').hasMatch(tag)) {
+      (!sequential &&
+          (tag == null ||
+              !RegExp(r'^"[\x21\x23-\x7e]{1,126}"$').hasMatch(tag)))) {
     throw const FixtureMediaException(FixtureMediaFailure.range);
   }
-  final start = int.parse(range[1]!);
-  final end = int.parse(range[2]!);
-  final size = int.parse(range[3]!);
-  if (start != offset ||
-      end != size - 1 ||
-      size <= offset ||
+  final int size;
+  if (sequential && offset == 0 && response.status == 200 && rawRange == null) {
+    size = length;
+  } else {
+    final range = RegExp(r'^bytes (\d{1,10})-(\d{1,10})/(\d{1,10})$')
+        .firstMatch(rawRange ?? '');
+    if (response.status != 206 || range == null) {
+      throw const FixtureMediaException(FixtureMediaFailure.range);
+    }
+    size = int.parse(range[3]!);
+    if (int.parse(range[1]!) != offset || int.parse(range[2]!) != size - 1) {
+      throw const FixtureMediaException(FixtureMediaFailure.range);
+    }
+  }
+  if (size <= offset ||
       size <= _headerBytes ||
       size > _maximumWave ||
-      length != size - start) {
+      length != size - offset) {
     throw const FixtureMediaException(FixtureMediaFailure.range);
   }
   final type = single('content-type')?.split(';').first.trim().toLowerCase();
@@ -196,7 +212,7 @@ final class FixtureWave implements ControlledPcmInput {
   }.contains(type)) {
     throw const FixtureMediaException(FixtureMediaFailure.format);
   }
-  return (size: size, tag: tag);
+  return (size: size, tag: sequential ? null : tag);
 }
 
 final class _WaveDescription {

@@ -41,7 +41,7 @@ final class LxRequestException extends OnlineException {
   @override
   String toString() => switch (reason) {
     LxRequestFailure.apiAddress => '音源取址请求的地址不受支持，已拦截该请求。',
-    LxRequestFailure.mediaAddress => '音源返回的播放地址不受支持，已停止播放。',
+    LxRequestFailure.mediaAddress => '音源返回的音频地址不受支持，已停止请求。',
     LxRequestFailure.privateAddress => '音源请求指向非公网地址，已停止继续请求。',
     LxRequestFailure.headers => '音源使用了当前不支持的请求头，请换一个音源。',
     LxRequestFailure.method => '音源使用了当前不支持的请求方法，请换一个音源。',

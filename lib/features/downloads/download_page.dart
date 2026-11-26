@@ -41,6 +41,7 @@ class DownloadPage extends StatelessWidget {
             ),
           for (final task in controller.tasks)
             Card(
+              key: ObjectKey(task),
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Column(
@@ -87,12 +88,9 @@ class DownloadPage extends StatelessWidget {
                         onPressed: controller.cancel,
                         child: const Text('取消下载'),
                       ),
-                    if ({
-                      DownloadStatus.failed,
-                      DownloadStatus.cancelled,
-                    }.contains(task.status))
+                    if (task.retryable)
                       TextButton(
-                        onPressed: controller.busy
+                        onPressed: controller.busy || controller.choosing
                             ? null
                             : () => unawaited(controller.retry(task)),
                         child: const Text('重新下载'),

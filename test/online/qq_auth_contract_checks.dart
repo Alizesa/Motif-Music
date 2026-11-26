@@ -854,6 +854,51 @@ Map<String, Future<void> Function()> qqAuthChecks() => {
           await session.close();
         }
       },
+  'public detail uses and reuses only catalog metadata even with a signed session':
+      () async {
+        final session = await signedSession(MemoryQqVault());
+        final private = FakeQqAccountTransport();
+        final public = FakeQqTransport()
+          ..reply = (_) async => moduleResponse({'track_info': songJson()});
+        final api = QqAccountApi(sessions: session, transport: private);
+        final client = QqMusicClient(
+          transport: public,
+          accountApi: api,
+          coordinator: TestClock().coordinator(),
+        );
+        try {
+          final results = await Future.wait([
+            client.publicDetail('songMid001', songType: 1),
+            client.publicDetail('songMid001', songType: 1),
+          ]);
+          await client.publicDetail('songMid001', songType: 1);
+          _check(
+            private.requests.isEmpty,
+            'Public detail used the private session',
+          );
+          _check(
+            public.requests.length == 1,
+            'Catalog lookups did not coalesce/cache',
+          );
+          final request = public.requests.single;
+          final module = request.jsonBody!['req_1'] as Map;
+          final parameters = module['param'] as Map;
+          _check(
+            module['method'] == 'get_song_detail_yqq' &&
+                parameters['song_type'] == 1 &&
+                !jsonEncode(request.jsonBody).contains('fixture-key') &&
+                results.every(
+                  (track) =>
+                      track.mid == 'songMid001' && track.mediaMid == 'media001',
+                ),
+            'Public detail must return metadata without credentials or playback tickets',
+          );
+        } finally {
+          client.close();
+          api.close();
+          await session.close();
+        }
+      },
   'anonymous detail trusts the returned type for the same MID': () async {
     final transport = FakeQqTransport()
       ..reply = (_) async => moduleResponse({'track_info': songJson()});
