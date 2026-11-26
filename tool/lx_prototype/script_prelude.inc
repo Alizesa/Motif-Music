@@ -164,7 +164,8 @@ R"LXJS(
       if (!capabilities.sources.tx?.qualitys.includes(parameters.event.info.type)) {
         return 'D{"error":"unsupported"}';
       }
-      queued.length = 0;
+      // Settle queued startup requests through the denial callback below.
+      // They remain ineligible for network access after switching to play.
       timers.clear();
       phase = 'play';
       const promise = handler.call(lx, parameters.event);
