@@ -5,6 +5,8 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import '../../audio/controlled_pcm.dart';
+import '../../diagnostics/diagnostic_failure.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../domain/online_error.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_http_connection.dart';
@@ -449,17 +451,22 @@ Future<FixtureRangeResponse> _openMediaRange(
 }
 
 final class LxMediaTransport implements FixtureRangeTransport {
-  LxMediaTransport(this.uri, this.owner, {LxMediaOpen? open})
+  LxMediaTransport(this.uri, this.owner, {LxMediaOpen? open, this.trace})
     : _wholeFile = false,
       _open = open ?? _openMediaRange;
 
   /// Fresh downloads use a complete GET, not a playback seek/probe request.
-  LxMediaTransport.download(this.uri, this.owner, {LxMediaOpen? open})
-    : _wholeFile = true,
-      _open = open ?? _openMediaRange;
+  LxMediaTransport.download(
+    this.uri,
+    this.owner, {
+    LxMediaOpen? open,
+    this.trace,
+  }) : _wholeFile = true,
+       _open = open ?? _openMediaRange;
 
   final Uri uri;
   final PcmCancellation owner;
+  final DiagnosticTrace? trace;
   final bool _wholeFile;
   final LxMediaOpen _open;
   static const _downloadUserAgent =
@@ -481,6 +488,7 @@ final class LxMediaTransport implements FixtureRangeTransport {
     final unlistenOwner = owner.listen(scope.cancel);
     final unlisten = cancellation.listen(scope.cancel);
     var next = _representation ?? uri;
+    final watch = trace?.active == true ? (Stopwatch()..start()) : null;
     try {
       for (var hop = 0; hop <= 3; hop++) {
         scope.check();
@@ -496,6 +504,20 @@ final class LxMediaTransport implements FixtureRangeTransport {
             'if-range': ?validator,
           },
         }, scope);
+        if (watch != null) {
+          final length = int.tryParse(
+            reply.headers['content-length']?.firstOrNull ?? '',
+          );
+          trace?.record(DiagnosticEvent.lxMediaResponse, {
+            DiagnosticField.status: reply.status,
+            DiagnosticField.elapsedMs: watch.elapsedMilliseconds,
+            DiagnosticField.redirects: hop,
+            DiagnosticField.ranged: !_wholeFile,
+            DiagnosticField.offset: offset,
+            if (length != null && length >= 0 && length <= 512 * 1024 * 1024)
+              DiagnosticField.totalBytes: length,
+          });
+        }
         if (!const {301, 302, 303, 307, 308}.contains(reply.status)) {
           if (!_wholeFile &&
               offset == 0 &&
@@ -518,7 +540,13 @@ final class LxMediaTransport implements FixtureRangeTransport {
         next = next.resolve(locations!.single);
       }
       throw const OnlineException(OnlineErrorKind.rejected);
-    } catch (_) {
+    } catch (error) {
+      if (trace?.active == true && !scope.cancelled) {
+        trace!.record(DiagnosticEvent.lxMediaFailure, {
+          DiagnosticField.elapsedMs: watch?.elapsedMilliseconds,
+          ...diagnosticFailure(error),
+        });
+      }
       unlisten();
       unlistenOwner();
       scope.cancel();

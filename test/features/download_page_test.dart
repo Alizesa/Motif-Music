@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:motif/audio/controlled_pcm.dart';
+import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/downloads/download_controller.dart';
 import 'package:motif/downloads/download_destination.dart';
 import 'package:motif/features/downloads/download_page.dart';
@@ -126,6 +127,7 @@ class _Source extends FakePlaybackSource implements TrackDownloadSource {
     required PcmCancellation cancellation,
     required DownloadWrite write,
     required void Function(int) onTotal,
+    DiagnosticTrace? trace,
   }) async {
     transfers++;
     if (gate != null) await cancellation.until(gate!.future);

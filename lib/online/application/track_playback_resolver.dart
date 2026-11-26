@@ -1,4 +1,5 @@
 import '../../audio/controlled_pcm.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../../library/domain/audio_quality.dart';
 import '../../library/domain/library_models.dart';
 import '../../library/domain/library_playback_error.dart';
@@ -65,6 +66,7 @@ class TrackPlaybackResolver {
     String? fallbackSourceId,
     AudioQuality? reportedQuality,
     PcmCancellation? cancellation,
+    DiagnosticTrace? trace,
   }) async {
     void checkCurrent() {
       if (!isCurrent()) throw const PlaybackCancelled();
@@ -73,6 +75,11 @@ class TrackPlaybackResolver {
     checkCurrent();
     final local = await matchLocal(track, reportedQuality);
     checkCurrent();
+    trace?.record(DiagnosticEvent.localMatch, {
+      DiagnosticField.state: local.status,
+      DiagnosticField.reason: local.reason,
+      DiagnosticField.candidates: local.candidates.length,
+    });
     LocalAudioFile? chosen = local.selected;
     if (local.status == LocalPlaybackStatus.needsConfirmation) {
       final choice = await confirm(track, local);
@@ -95,6 +102,9 @@ class TrackPlaybackResolver {
       } on LibraryPlaybackException catch (error) {
         checkCurrent();
         if (error.kind != LibraryPlaybackErrorKind.unavailable) rethrow;
+        trace?.record(DiagnosticEvent.localFallback, {
+          DiagnosticField.reason: error.kind,
+        });
         // A disappeared file may fall back online; a busy/failed index may not.
       }
     }
@@ -106,6 +116,7 @@ class TrackPlaybackResolver {
       fallbackSourceId: fallbackSourceId,
       checkActive: checkCurrent,
       cancellation: cancellation,
+      trace: trace,
     );
     return ResolvedPlaybackTrack(uri: stream.uri.toString(), stream: stream);
   }

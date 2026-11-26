@@ -6,11 +6,13 @@ class ApplicationSettingsPage extends StatelessWidget {
     required this.onOpenQuality,
     required this.onOpenSources,
     required this.onOpenAudioTest,
+    required this.onOpenDiagnostics,
   });
 
   final VoidCallback onOpenQuality;
   final VoidCallback onOpenSources;
   final VoidCallback onOpenAudioTest;
+  final VoidCallback onOpenDiagnostics;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -49,6 +51,15 @@ class ApplicationSettingsPage extends StatelessWidget {
                       subtitle: const Text('播放、均衡器与前级'),
                       trailing: const Icon(Icons.chevron_right_rounded),
                       onTap: onOpenAudioTest,
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      key: const Key('settings-diagnostics'),
+                      leading: const Icon(Icons.bug_report_outlined),
+                      title: const Text('调试与诊断'),
+                      subtitle: const Text('记录并导出播放和下载问题'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: onOpenDiagnostics,
                     ),
                   ],
                 ),

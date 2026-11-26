@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../../audio/controlled_pcm.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../qq/qq_track.dart';
 import 'playback_source.dart';
 
@@ -17,5 +18,6 @@ abstract interface class TrackDownloadSource {
     required PcmCancellation cancellation,
     required DownloadWrite write,
     required void Function(int) onTotal,
+    DiagnosticTrace? trace,
   });
 }

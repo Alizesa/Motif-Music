@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../audio/audio_engine.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../../downloads/download_controller.dart';
 import '../../downloads/platform_download_destination.dart';
 import '../downloads/download_page.dart';
@@ -30,6 +31,7 @@ import '../player/catalog_player_widgets.dart';
 import '../player/player_prototype_page.dart';
 import '../search/qq_search_page.dart';
 import '../settings/application_settings_page.dart';
+import '../settings/diagnostics_settings_page.dart';
 import '../settings/music_source_settings_page.dart';
 import '../settings/playback_settings_page.dart';
 import 'motif_home_tabs.dart';
@@ -54,6 +56,7 @@ class MotifHomePage extends StatefulWidget {
     this.sessions,
     this.authClient,
     this.accountApi,
+    this.saveDiagnosticReport,
   });
 
   final LibraryController library;
@@ -64,6 +67,7 @@ class MotifHomePage extends StatefulWidget {
   final QqSessionManager? sessions;
   final QqAuthClient? authClient;
   final QqAccountApi? accountApi;
+  final DiagnosticSave? saveDiagnosticReport;
 
   @override
   State<MotifHomePage> createState() => _MotifHomePageState();
@@ -71,6 +75,7 @@ class MotifHomePage extends StatefulWidget {
 
 class _MotifHomePageState extends State<MotifHomePage>
     with WidgetsBindingObserver {
+  final _diagnostics = DiagnosticRecorder();
   late final AudioEngine _engine;
   late final MusicSourceRegistry _sources;
   late final DownloadController _downloads;
@@ -90,7 +95,9 @@ class _MotifHomePageState extends State<MotifHomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _engine = widget.engineFactory?.call() ?? MpvAudioEngine();
+    _engine =
+        widget.engineFactory?.call() ??
+        MpvAudioEngine(diagnostics: _diagnostics);
     _sources = MusicSourceRegistry(
       qq: widget.qqMusic,
       thirdPartySources: widget.thirdPartySources,
@@ -124,10 +131,12 @@ class _MotifHomePageState extends State<MotifHomePage>
     _downloads = DownloadController(
       sources: _sources,
       destination: const PlatformDownloadDestination(),
+      diagnostics: _diagnostics,
     );
     _playback = OnlinePlaybackController(
       engine: _engine,
       settings: _settings,
+      diagnostics: _diagnostics,
       resolver: TrackPlaybackResolver(
         sources: _sources,
         matchLocal: (track, quality) => widget.library.resolveLocalPlayback(
@@ -166,6 +175,9 @@ class _MotifHomePageState extends State<MotifHomePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _diagnostics.record(DiagnosticEvent.lifecycle, {
+      DiagnosticField.state: state,
+    });
     if (state == AppLifecycleState.detached) unawaited(_downloads.close());
   }
 
@@ -183,6 +195,7 @@ class _MotifHomePageState extends State<MotifHomePage>
     _lxSources?.dispose();
     _sources.close();
     unawaited(_engine.dispose());
+    _diagnostics.dispose();
     super.dispose();
   }
 
@@ -378,8 +391,31 @@ class _MotifHomePageState extends State<MotifHomePage>
       onOpenQuality: _openQualitySettings,
       onOpenSources: _openSourceSettings,
       onOpenAudioTest: _openPlayerPrototype,
+      onOpenDiagnostics: _openDiagnostics,
     ),
   );
+
+  Future<void> _openDiagnostics() => _push(
+    DiagnosticsSettingsPage(
+      recorder: _diagnostics,
+      snapshot: _diagnosticSnapshot,
+      save: widget.saveDiagnosticReport,
+    ),
+    showMiniPlayer: false,
+  );
+
+  Map<DiagnosticSection, DiagnosticFacts> _diagnosticSnapshot() => {
+    DiagnosticSection.app: {
+      DiagnosticField.lxAvailable: _lxSources != null,
+      DiagnosticField.ready: _lxSources?.ready,
+      DiagnosticField.sourceCount: _sources.sources.length,
+      DiagnosticField.state: WidgetsBinding.instance.lifecycleState,
+    },
+    DiagnosticSection.playback: _playback.diagnosticSnapshot(),
+    if (_engine case final MpvAudioEngine mpv)
+      DiagnosticSection.player: mpv.diagnosticSnapshot(),
+    DiagnosticSection.downloads: _downloads.diagnosticSnapshot(),
+  };
 
   Future<void> _openQualitySettings() => _push(
     PlaybackSettingsPage(

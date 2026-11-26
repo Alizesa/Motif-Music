@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 
 import '../../audio/controlled_pcm.dart';
 import '../../audio/controlled_encoded.dart';
+import '../../diagnostics/diagnostic_failure.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../domain/music_source_registry.dart';
 import '../domain/download_source.dart';
 import '../domain/online_error.dart';
@@ -55,20 +57,18 @@ final class LxSourceManager extends ChangeNotifier {
     required this.registry,
     LxRun? run,
     LxFetch? fetch,
-    LxOpen? open,
-    LxDownload? download,
+    this._open,
+    this._download,
     this._downloadDetail,
   }) : _run = run ?? const LxNativeWorker().run,
-       _fetch = fetch ?? const LxHttpsTransport().api,
-       _open = open ?? _openAudio,
-       _download = download ?? _downloadAudio;
+       _fetch = fetch ?? const LxHttpsTransport().api;
 
   final LxSourceStore store;
   final MusicSourceRegistry registry;
   final LxRun _run;
   final LxFetch _fetch;
-  final LxOpen _open;
-  final LxDownload _download;
+  final LxOpen? _open;
+  final LxDownload? _download;
   final LxDownloadDetail? _downloadDetail;
   final _closing = PcmCancellation();
   Future<void>? _initializing;
@@ -275,15 +275,21 @@ Future<ControlledAudioInput> _openAudio(
   Uri uri,
   PcmCancellation owner,
   PcmCancellation request,
-) => openLxAudio(LxMediaTransport(uri, owner), request);
+  DiagnosticTrace? trace,
+) => openLxAudio(LxMediaTransport(uri, owner, trace: trace), request);
 
 Future<String> _downloadAudio(
   Uri uri,
   PcmCancellation work,
   DownloadWrite write,
   void Function(int) onTotal,
-) =>
-    downloadLxAudio(LxMediaTransport.download(uri, work), work, write, onTotal);
+  DiagnosticTrace? trace,
+) => downloadLxAudio(
+  LxMediaTransport.download(uri, work, trace: trace),
+  work,
+  write,
+  onTotal,
+);
 
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
@@ -306,8 +312,8 @@ final class _ManagedLxSource
   final LxSourceStore store;
   final LxRun run;
   final LxFetch fetch;
-  final LxOpen open;
-  final LxDownload download;
+  final LxOpen? open;
+  final LxDownload? download;
   final LxDownloadDetail? downloadDetail;
   final _lifetime = PcmCancellation();
   static int _nextIdentity = 0;
@@ -322,6 +328,7 @@ final class _ManagedLxSource
     QqTrack track,
     OnlineQuality quality,
     PcmCancellation work,
+    DiagnosticTrace? trace,
   ) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
@@ -329,7 +336,10 @@ final class _ManagedLxSource
     work.check();
     final script = await store.read(source);
     work.check();
-    final broker = _LxRequestBudget(fetch);
+    final broker = _LxRequestBudget(fetch, trace);
+    trace?.record(DiagnosticEvent.lxScript, {
+      DiagnosticField.state: DiagnosticResult.started,
+    });
     final result = await run(
       script.bytes,
       info: script.info,
@@ -344,6 +354,11 @@ final class _ManagedLxSource
     work.check();
     if (broker.terminal != null) throw broker.terminal!;
     final uri = checkedLxUrl(result['url']);
+    trace?.record(DiagnosticEvent.lxScript, {
+      DiagnosticField.state: uri == null
+          ? DiagnosticResult.failed
+          : DiagnosticResult.succeeded,
+    });
     if (uri != null) return uri;
     if (result.containsKey('url')) {
       throw const LxRequestException(LxRequestFailure.mediaAddress);
@@ -364,15 +379,22 @@ final class _ManagedLxSource
     QqTrack track,
     OnlineQuality quality,
     PcmCancellation work,
+    DiagnosticTrace? trace,
   ) async {
     final detail = downloadDetail;
     if (detail == null ||
         (track.mediaMid != null &&
             track.durationMs != null &&
             track.qualitySizes.containsKey(quality))) {
+      trace?.record(DiagnosticEvent.lxCatalog, {
+        DiagnosticField.state: DiagnosticResult.skipped,
+      });
       return track;
     }
     work.check();
+    trace?.record(DiagnosticEvent.lxCatalog, {
+      DiagnosticField.state: DiagnosticResult.started,
+    });
     try {
       // The public client owns caching, coalescing and rate limits. Do not let
       // a queued catalog lookup indefinitely delay or block script resolution.
@@ -387,8 +409,14 @@ final class _ManagedLxSource
           (track.songId != null &&
               extra.songId != null &&
               extra.songId != track.songId)) {
+        trace?.record(DiagnosticEvent.lxCatalog, {
+          DiagnosticField.state: DiagnosticResult.mismatched,
+        });
         return track;
       }
+      trace?.record(DiagnosticEvent.lxCatalog, {
+        DiagnosticField.state: DiagnosticResult.succeeded,
+      });
       return QqTrack(
         mid: track.mid,
         title: track.title,
@@ -401,10 +429,15 @@ final class _ManagedLxSource
         durationMs: track.durationMs ?? extra.durationMs,
         qualitySizes: {...extra.qualitySizes, ...track.qualitySizes},
       );
-    } on OnlineException {
+    } on Exception catch (error) {
+      if (error is! OnlineException && error is! TimeoutException) rethrow;
+      if (trace?.active == true) {
+        trace!.record(DiagnosticEvent.lxCatalog, {
+          DiagnosticField.state: DiagnosticResult.failed,
+          ...diagnosticFailure(error),
+        });
+      }
       // Some scripts can resolve the original sparse catalog row directly.
-      return track;
-    } on TimeoutException {
       return track;
     }
   }
@@ -416,6 +449,7 @@ final class _ManagedLxSource
     required PcmCancellation cancellation,
     required DownloadWrite write,
     required void Function(int) onTotal,
+    DiagnosticTrace? trace,
   }) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
@@ -424,12 +458,18 @@ final class _ManagedLxSource
     final release = _lifetime.listen(work.cancel);
     final detach = cancellation.listen(work.cancel);
     try {
-      final prepared = await _prepareDownloadTrack(track, quality, work);
+      final prepared = await _prepareDownloadTrack(track, quality, work, trace);
       final Uri uri;
       try {
         // The worker observes cancellation and reaps its process before returning.
-        uri = await _address(prepared, quality, work);
+        uri = await _address(prepared, quality, work, trace);
       } on OnlineException catch (error) {
+        if (trace?.active == true) {
+          trace!.record(
+            DiagnosticEvent.sourceFailure,
+            diagnosticFailure(error),
+          );
+        }
         if (error is LxRequestException ||
             (error.kind != OnlineErrorKind.unavailable &&
                 error.kind != OnlineErrorKind.operationRejected)) {
@@ -437,11 +477,27 @@ final class _ManagedLxSource
         }
         throw _DownloadAddressException(error.kind);
       }
-      return await download(uri, work, write, onTotal);
+      trace?.record(DiagnosticEvent.sourceReady);
+      final override = download;
+      final format = await (override == null
+          ? _downloadAudio(uri, work, write, onTotal, trace)
+          : override(uri, work, write, onTotal));
+      trace?.record(DiagnosticEvent.lxMediaReady, {
+        DiagnosticField.medium: switch (format) {
+          'mp3' => DiagnosticMedium.mp3,
+          'flac' => DiagnosticMedium.flac,
+          'wav' => DiagnosticMedium.wave,
+          _ => null,
+        },
+      });
+      return format;
     } on PcmCancelled {
       if (cancellation.cancelled) rethrow;
       throw const OnlineException(OnlineErrorKind.closed);
     } on FixtureMediaException catch (error) {
+      trace?.record(DiagnosticEvent.lxMediaFailure, {
+        DiagnosticField.reason: error.kind,
+      });
       throw OnlineException(switch (error.kind) {
         FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.denied => OnlineErrorKind.rejected,
@@ -464,8 +520,9 @@ final class _ManagedLxSource
   Future<OnlineStream> resolveCancellable(
     QqTrack track,
     OnlineQuality quality,
-    PcmCancellation cancellation,
-  ) async {
+    PcmCancellation cancellation, {
+    DiagnosticTrace? trace,
+  }) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
     }
@@ -477,9 +534,12 @@ final class _ManagedLxSource
     var handedOff = false;
     try {
       work.check();
-      final uri = await _address(track, quality, work);
+      final uri = await _address(track, quality, work, trace);
+      final override = open;
       final input = await work.until(
-        open(uri, owner, work),
+        override == null
+            ? _openAudio(uri, owner, work, trace)
+            : override(uri, owner, work),
         discard: (late) => late.close(),
       );
       final ControlledAudioInput owned;
@@ -509,6 +569,9 @@ final class _ManagedLxSource
       }
       throw const OnlineException(OnlineErrorKind.transport);
     } on FixtureMediaException catch (error) {
+      trace?.record(DiagnosticEvent.lxMediaFailure, {
+        DiagnosticField.reason: error.kind,
+      });
       throw OnlineException(switch (error.kind) {
         FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.transport ||
@@ -542,9 +605,11 @@ final class _DownloadAddressException extends OnlineException {
 }
 
 final class _LxRequestBudget {
-  _LxRequestBudget(this.fetch);
+  _LxRequestBudget(this.fetch, this.trace);
   final LxFetch fetch;
+  final DiagnosticTrace? trace;
   int _requests = 0;
+  int _candidates = 0;
   bool get admitted => _requests > 0;
   bool transmissionFailed = false;
   OnlineException? lastTransportFailure;
@@ -557,12 +622,27 @@ final class _LxRequestBudget {
   ) async {
     const refused = {'error': 'denied'};
     cancellation.check();
-    if (_requests >= 4 || terminal != null) return refused;
+    final candidate = ++_candidates;
+    if (_requests >= 4 || terminal != null) {
+      trace?.record(DiagnosticEvent.lxApiFailure, {
+        DiagnosticField.candidate: candidate,
+        DiagnosticField.reason: _requests >= 4
+            ? LxRequestFailure.budget
+            : terminal?.kind,
+      });
+      return refused;
+    }
     final uri = checkedLxUrl(message['url']);
     if (uri == null) {
       denied ??= const LxRequestException(LxRequestFailure.apiAddress);
+      trace?.record(DiagnosticEvent.lxApiFailure, {
+        DiagnosticField.candidate: candidate,
+        DiagnosticField.reason: LxRequestFailure.apiAddress,
+      });
       return refused;
     }
+    final watch = trace?.active == true ? (Stopwatch()..start()) : null;
+    var redirects = 0;
     try {
       final request = LxApiRequest.parse(
         message,
@@ -571,10 +651,22 @@ final class _LxRequestBudget {
             throw const LxRequestException(LxRequestFailure.budget);
           }
           _requests++;
+          redirects++;
         },
       );
       _requests++;
-      final result = {'response': await fetch(request, cancellation)};
+      final response = await fetch(request, cancellation);
+      final result = {'response': response};
+      if (watch != null) {
+        final status = response['statusCode'];
+        trace?.record(DiagnosticEvent.lxApiResponse, {
+          DiagnosticField.candidate: candidate,
+          DiagnosticField.elapsedMs: watch.elapsedMilliseconds,
+          DiagnosticField.redirects: redirects,
+          if (status is int && status >= 100 && status <= 599)
+            DiagnosticField.status: status,
+        });
+      }
       // A later valid response supersedes an earlier candidate's network
       // failure; parsing that response is the script's next decision.
       transmissionFailed = false;
@@ -587,6 +679,7 @@ final class _LxRequestBudget {
     } on PcmCancelled {
       rethrow;
     } on OnlineException catch (error) {
+      _recordFailure(candidate, error, watch);
       if (error is LxRequestException &&
           const {
             LxRequestFailure.headers,
@@ -601,14 +694,25 @@ final class _LxRequestBudget {
         terminal = error;
       }
       return refused;
-    } on IOException {
+    } on IOException catch (error) {
+      _recordFailure(candidate, error, watch);
       transmissionFailed = true;
       lastTransportFailure = const LxRequestException(LxRequestFailure.connect);
       return refused;
-    } on FormatException {
+    } on FormatException catch (error) {
+      _recordFailure(candidate, error, watch);
       terminal = const OnlineException(OnlineErrorKind.malformedResponse);
       return refused;
     }
+  }
+
+  void _recordFailure(int candidate, Object error, Stopwatch? watch) {
+    if (trace?.active != true) return;
+    trace!.record(DiagnosticEvent.lxApiFailure, {
+      DiagnosticField.candidate: candidate,
+      DiagnosticField.elapsedMs: watch?.elapsedMilliseconds,
+      ...diagnosticFailure(error),
+    });
   }
 }
 

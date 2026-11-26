@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import '../diagnostics/diagnostic_failure.dart';
+import '../diagnostics/diagnostic_recorder.dart';
 import 'controlled_pcm.dart';
 
 enum ControlledAudioFormat { mp3, flac }
@@ -17,13 +19,19 @@ abstract interface class ControlledEncodedInput
 
 /// A private, read-only bridge for the decoder. It has no URL forwarding API.
 final class ControlledAudioServer {
-  ControlledAudioServer._(this.input, this._server, this._token) {
+  ControlledAudioServer._(
+    this.input,
+    this._server,
+    this._token,
+    this._diagnostics,
+  ) {
     _requests = _server.listen((request) => unawaited(_serve(request)));
   }
 
   final ControlledEncodedInput input;
   final HttpServer _server;
   final String _token;
+  final DiagnosticRecorder? _diagnostics;
   late final StreamSubscription<HttpRequest> _requests;
   final _closing = PcmCancellation();
   final _active = <PcmCancellation, ControlledPcmRead?>{};
@@ -37,8 +45,9 @@ final class ControlledAudioServer {
 
   static Future<ControlledAudioServer> open(
     ControlledEncodedInput input,
-    PcmCancellation cancellation,
-  ) async {
+    PcmCancellation cancellation, {
+    DiagnosticRecorder? diagnostics,
+  }) async {
     final server = await cancellation.until(
       HttpServer.bind(InternetAddress.loopbackIPv4, 0, shared: false),
       discard: (late) => unawaited(late.close(force: true)),
@@ -50,7 +59,7 @@ final class ControlledAudioServer {
       24,
       (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
     ).join();
-    final result = ControlledAudioServer._(input, server, token);
+    final result = ControlledAudioServer._(input, server, token, diagnostics);
     if (cancellation.cancelled) {
       result.close();
       cancellation.check();
@@ -61,7 +70,11 @@ final class ControlledAudioServer {
   Future<void> _serve(HttpRequest request) async {
     final response = request.response;
     PcmCancellation? work;
+    final generation = _diagnostics?.enabled == true
+        ? _diagnostics!.captureGeneration
+        : null;
     ControlledPcmRead? reader;
+    int? offset;
     void Function()? unlink;
     try {
       if (_closing.cancelled ||
@@ -130,6 +143,7 @@ final class ControlledAudioServer {
           onError: (Object _) => work?.cancel(),
         ),
       );
+      offset = start;
       final current = await work.until(
         input.openAt(start, work),
         discard: (late) => late.close(),
@@ -148,7 +162,16 @@ final class ControlledAudioServer {
         await work.until(response.flush());
         remaining -= bytes.length;
       }
-    } catch (_) {
+    } catch (error) {
+      if (generation != null &&
+          _diagnostics?.captureGeneration == generation &&
+          work?.cancelled == false &&
+          !_closing.cancelled) {
+        _diagnostics!.record(DiagnosticEvent.controlledReadFailure, {
+          DiagnosticField.offset: offset,
+          ...diagnosticFailure(error),
+        });
+      }
       try {
         final socket = await response.detachSocket(writeHeaders: false);
         socket.destroy();

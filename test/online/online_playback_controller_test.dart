@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/audio_engine.dart';
+import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/library/domain/local_playback_matcher.dart';
 import 'package:motif/online/application/online_playback_controller.dart';
 import 'package:motif/online/application/track_playback_resolver.dart';
@@ -21,6 +23,7 @@ void main() {
   late FakePlaybackSource custom;
   late OnlinePlaybackSettingsController settings;
   late OnlinePlaybackController playback;
+  late DiagnosticRecorder diagnostics;
   late Future<LocalPlaybackResolution> Function(QqTrack) match;
 
   LocalPlaybackResolution noMatch() => LocalPlaybackResolution(
@@ -38,8 +41,10 @@ void main() {
     );
     await settings.initialize();
     match = (_) async => noMatch();
+    diagnostics = DiagnosticRecorder();
     playback = OnlinePlaybackController(
       engine: engine,
+      diagnostics: diagnostics,
       settings: settings,
       resolver: TrackPlaybackResolver(
         sources: MusicSourceRegistry(
@@ -59,6 +64,7 @@ void main() {
     playback.dispose();
     playback.resolver.sources.close();
     settings.dispose();
+    diagnostics.dispose();
     await engine.dispose();
   });
 
@@ -117,6 +123,40 @@ void main() {
       expect(engine.openCount, 1);
     },
   );
+
+  test('fallback and native opening share a playback ID without exposing track identity', () async {
+    diagnostics.setEnabled(true);
+    await settings.save(
+      const OnlinePlaybackPreferences(fallbackSourceId: 'custom'),
+    );
+    qq.reply = (_, _) async =>
+        throw const OnlineException(OnlineErrorKind.unavailable);
+    expect(await playback.playQueue([playbackTrack(1)]), isTrue);
+    final log = utf8.decode(
+      diagnostics.export({
+        DiagnosticSection.playback: playback.diagnosticSnapshot(),
+      }).bytes,
+    );
+    final events = (jsonDecode(log) as Map)['events'] as List;
+    expect(events.map((event) => event['event']), [
+      'playbackRequested',
+      'localMatch',
+      'sourceRequest',
+      'sourceFailure',
+      'sourceFallback',
+      'sourceRequest',
+      'sourceReady',
+      'engineOpening',
+      'playbackReady',
+    ]);
+    expect(events.every((event) => event['operationId'] == 1), isTrue);
+    expect(events[2]['source'], 'qq');
+    expect(events[4]['source'], 'other');
+    expect(events[4]['sourceIndex'], 2);
+    expect(log, isNot(contains('songMid1')));
+    expect(log, isNot(contains('audio.example')));
+    expect(log, isNot(contains('custom')));
+  });
 
   test('each native completion lazily advances one catalog entry', () async {
     await playback.playQueue(List.generate(3, (i) => playbackTrack(i + 1)));

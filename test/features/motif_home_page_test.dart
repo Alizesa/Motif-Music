@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/features/home/motif_home_page.dart';
+import 'package:motif/features/settings/diagnostics_settings_page.dart';
 import 'package:motif/library/application/library_controller.dart';
 import 'package:motif/library/data/library_database.dart';
 import 'package:motif/online/domain/online_error.dart';
@@ -59,6 +61,7 @@ void main() {
   Future<void> pumpHome(
     WidgetTester tester, {
     TextScaler scaler = TextScaler.noScaling,
+    DiagnosticSave? saveDiagnosticReport,
   }) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -71,6 +74,7 @@ void main() {
           qqMusic: client,
           engineFactory: () => engine,
           preferencesStore: MemoryPlaybackPreferencesStore(),
+          saveDiagnosticReport: saveDiagnosticReport,
         ),
       ),
     );
@@ -296,6 +300,99 @@ void main() {
     expect(find.text('LX 音源管理'), findsNothing);
     expect(find.text('优先播放来源'), findsOneWidget);
   });
+
+  testWidgets(
+    'debug settings capture a playback failure across route changes',
+    (tester) async {
+      var failure = false;
+      transport.reply = (request) async => request.jsonBody!.containsKey('SONG')
+          ? searchResponse(
+              tracks: [songJson()..['name'] = 'Private song title'],
+            )
+          : failure
+          ? moduleResponse({'midurlinfo': []})
+          : moduleResponse({
+              'midurlinfo': [
+                {
+                  'result': 0,
+                  'songmid': 'songMid001',
+                  'purl': 'M500media001.mp3',
+                },
+              ],
+              'sip': ['https://audio.example/'],
+            });
+      Map<String, dynamic>? report;
+      await pumpHome(
+        tester,
+        saveDiagnosticReport: (result) async {
+          report =
+              jsonDecode(utf8.decode(result.bytes)) as Map<String, dynamic>;
+          return true;
+        },
+      );
+
+      Future<void> debugSettings() async {
+        await tester.tap(find.byKey(const Key('my-settings')));
+        await tester.pumpAndSettle();
+        final button = find.byKey(const Key('settings-diagnostics'));
+        await tester.ensureVisible(button);
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+      }
+
+      await tester.tap(find.text('我的').last);
+      await tester.pumpAndSettle();
+      await debugSettings();
+      await tester.tap(find.text('记录诊断信息'));
+      await tester.pumpAndSettle();
+      for (var i = 0; i < 2; i++) {
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+      }
+      await tester.tap(find.text('首页').last);
+      await tester.pumpAndSettle();
+      failure = true;
+      await openSearch(tester);
+      await submitQuery(tester);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('qq-track-songMid001')));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('我的').last);
+      await tester.pumpAndSettle();
+      await debugSettings();
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isTrue,
+      );
+      final export = find.text('导出诊断报告');
+      await tester.ensureVisible(export);
+      await tester.tap(export);
+      await tester.pumpAndSettle();
+      final events = report!['events'] as List;
+      expect(
+        events.map((row) => row['event']),
+        containsAllInOrder([
+          'playbackRequested',
+          'localMatch',
+          'sourceRequest',
+          'sourceFailure',
+          'playbackFailed',
+        ]),
+      );
+      expect(events.last['reason'], 'unavailable');
+      final snapshot = report!['snapshot'] as Map;
+      expect(snapshot.keys, containsAll(['app', 'playback', 'downloads']));
+      for (final secret in [
+        'songMid001',
+        'Private song title',
+        'audio.example',
+      ]) {
+        expect(jsonEncode(report), isNot(contains(secret)));
+      }
+    },
+  );
 
   testWidgets('narrow large-text navigation and the carousel remain usable', (
     tester,

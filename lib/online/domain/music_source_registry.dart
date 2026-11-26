@@ -1,4 +1,6 @@
 import '../../audio/controlled_pcm.dart';
+import '../../diagnostics/diagnostic_failure.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import 'online_error.dart';
 import 'download_source.dart';
 import 'playback_source.dart';
@@ -44,6 +46,7 @@ class MusicSourceRegistry {
     QqTrack track,
     OnlineQuality quality, {
     required PcmCancellation cancellation,
+    DiagnosticTrace? trace,
     required DownloadWrite write,
     required void Function(int) onTotal,
   }) async {
@@ -53,12 +56,20 @@ class MusicSourceRegistry {
         .where((item) => item.id == sourceId)
         .firstOrNull;
     if (source == null) throw const OnlineException(OnlineErrorKind.closed);
-    final extension = await (source.resolver as TrackDownloadSource).transfer(
+    final resolver = source.resolver as TrackDownloadSource;
+    if (trace?.active == true) {
+      trace!.record(
+        DiagnosticEvent.sourceRequest,
+        _sourceFacts(source.id, quality),
+      );
+    }
+    final extension = await resolver.transfer(
       track,
       quality,
       cancellation: cancellation,
       write: write,
       onTotal: onTotal,
+      trace: trace,
     );
     _checkActive(null);
     cancellation.check();
@@ -94,6 +105,7 @@ class MusicSourceRegistry {
     String? fallbackSourceId,
     void Function()? checkActive,
     PcmCancellation? cancellation,
+    DiagnosticTrace? trace,
   }) async {
     _checkActive(checkActive);
     final ensureSources = loadManaged;
@@ -110,7 +122,14 @@ class MusicSourceRegistry {
         ? fallbackSourceId
         : null;
     try {
-      return await _resolve(primary, track, quality, checkActive, cancellation);
+      return await _attempt(
+        primary,
+        track,
+        quality,
+        checkActive,
+        cancellation,
+        trace,
+      );
     } on OnlineException catch (error) {
       _checkActive(checkActive);
       // Account rejection and cooldowns must not become a fallback loop.
@@ -125,7 +144,61 @@ class MusicSourceRegistry {
           }.contains(error.kind)) {
         rethrow;
       }
-      return _resolve(fallback, track, quality, checkActive, cancellation);
+      if (trace?.active == true) {
+        trace!.record(
+          DiagnosticEvent.sourceFallback,
+          _sourceFacts(fallback, quality),
+        );
+      }
+      return _attempt(
+        fallback,
+        track,
+        quality,
+        checkActive,
+        cancellation,
+        trace,
+      );
+    }
+  }
+
+  DiagnosticFacts _sourceFacts(String id, OnlineQuality quality) => {
+    DiagnosticField.source: id == 'qq'
+        ? DiagnosticSource.qq
+        : _managed.containsKey(id)
+        ? DiagnosticSource.lx
+        : DiagnosticSource.other,
+    // List position (1-based), never a user-chosen name, ID, or script hash.
+    DiagnosticField.sourceIndex:
+        sources.indexWhere((source) => source.id == id) + 1,
+    DiagnosticField.quality: quality,
+  };
+
+  Future<OnlineStream> _attempt(
+    String id,
+    QqTrack track,
+    OnlineQuality quality,
+    void Function()? checkActive,
+    PcmCancellation? cancellation,
+    DiagnosticTrace? trace,
+  ) async {
+    final facts = trace?.active == true ? _sourceFacts(id, quality) : null;
+    if (facts != null) trace!.record(DiagnosticEvent.sourceRequest, facts);
+    try {
+      final stream = await _resolve(
+        id,
+        track,
+        quality,
+        checkActive,
+        cancellation,
+        trace,
+      );
+      trace?.record(DiagnosticEvent.sourceReady);
+      return stream;
+    } on OnlineException catch (error) {
+      if (trace?.active == true) {
+        trace!.record(DiagnosticEvent.sourceFailure, diagnosticFailure(error));
+      }
+      rethrow;
     }
   }
 
@@ -135,6 +208,7 @@ class MusicSourceRegistry {
     OnlineQuality quality,
     void Function()? checkActive,
     PcmCancellation? cancellation,
+    DiagnosticTrace? trace,
   ) async {
     _checkActive(checkActive);
     final managed = _managed[id];
@@ -147,6 +221,7 @@ class MusicSourceRegistry {
             track,
             quality,
             cancellation ?? PcmCancellation(),
+            trace: trace,
           )
         : await resolver.resolve(track, quality);
     try {

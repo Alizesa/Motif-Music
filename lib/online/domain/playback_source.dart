@@ -1,4 +1,5 @@
 import '../../audio/controlled_pcm.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../../library/domain/audio_quality.dart';
 import '../qq/qq_track.dart';
 
@@ -62,8 +63,9 @@ abstract interface class CancellablePlaybackSource
   Future<OnlineStream> resolveCancellable(
     QqTrack track,
     OnlineQuality quality,
-    PcmCancellation cancellation,
-  );
+    PcmCancellation cancellation, {
+    DiagnosticTrace? trace,
+  });
 }
 
 Uri? parsePlaybackUri(Object? value) {

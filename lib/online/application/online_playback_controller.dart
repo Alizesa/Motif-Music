@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import '../../audio/audio_engine.dart';
 import '../../audio/controlled_pcm.dart';
 import '../../audio/controlled_encoded.dart';
+import '../../diagnostics/diagnostic_failure.dart';
+import '../../diagnostics/diagnostic_recorder.dart';
 import '../../library/domain/library_models.dart';
 import '../../library/domain/library_playback_error.dart';
 import '../../settings/online_playback_settings_controller.dart';
@@ -22,6 +24,7 @@ class OnlinePlaybackController extends ChangeNotifier {
     required this.resolver,
     required this.settings,
     required this.confirmLocal,
+    this.diagnostics,
   }) {
     continuation = RecommendationContinuation(queue: queue, onChanged: _notify);
     _subscriptions.addAll([
@@ -45,6 +48,7 @@ class OnlinePlaybackController extends ChangeNotifier {
         }
       }),
       engine.errors.listen((_) {
+        // The engine adapter records typed native events; don't capture text.
         _error = '播放失败，请重试。';
         _notify();
       }),
@@ -67,6 +71,8 @@ class OnlinePlaybackController extends ChangeNotifier {
   final TrackPlaybackResolver resolver;
   final OnlinePlaybackSettingsController settings;
   final ConfirmLocalPlayback confirmLocal;
+  final DiagnosticRecorder? diagnostics;
+  DiagnosticTrace? _playingTrace;
   final RecommendationQueue queue = RecommendationQueue();
   late final RecommendationContinuation continuation;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
@@ -110,6 +116,21 @@ class OnlinePlaybackController extends ChangeNotifier {
   bool get canPrevious =>
       _current != null ? queue.currentIndex > 0 : _nativeQueue.currentIndex > 0;
 
+  DiagnosticFacts diagnosticSnapshot() => {
+    DiagnosticField.loading: _loading,
+    DiagnosticField.playWhenReady: _playing,
+    DiagnosticField.hasMedia: hasMedia,
+    DiagnosticField.positionMs: _position.inMilliseconds,
+    DiagnosticField.durationMs: _duration.inMilliseconds,
+    DiagnosticField.quality: settings.value.quality,
+    DiagnosticField.queueSize: _current == null
+        ? _nativeQueue.tracks.length
+        : queue.tracks.length,
+    DiagnosticField.queueIndex: _current == null
+        ? _nativeQueue.currentIndex
+        : queue.currentIndex,
+  };
+
   Future<bool> playQueue(
     List<QqTrack> tracks, {
     int startIndex = 0,
@@ -119,7 +140,7 @@ class OnlinePlaybackController extends ChangeNotifier {
     try {
       draft.replace(tracks, startIndex: startIndex);
     } catch (error) {
-      _report(error);
+      _report(error, stage: DiagnosticStage.resolve);
       return false;
     }
     continuation.stop();
@@ -153,6 +174,11 @@ class OnlinePlaybackController extends ChangeNotifier {
     _intent?.cancel();
     final intent = _intent = PcmCancellation();
     bool isCurrent() => !_closed && generation == _generation;
+    final trace = diagnostics?.begin(DiagnosticOperation.playback);
+    trace?.record(DiagnosticEvent.playbackRequested);
+    var stage = DiagnosticStage.preferences;
+    var committed = false;
+    var failed = false;
     _loading = true;
     _requested = track;
     _error = null;
@@ -164,6 +190,7 @@ class OnlinePlaybackController extends ChangeNotifier {
       if (!isCurrent()) return false;
       if (!settings.isReady) throw StateError('Preferences unavailable');
       final preferences = settings.value;
+      stage = DiagnosticStage.resolve;
       final resolved = await resolver.resolve(
         track,
         preferences.quality,
@@ -172,15 +199,37 @@ class OnlinePlaybackController extends ChangeNotifier {
         confirm: confirmLocal,
         isCurrent: isCurrent,
         cancellation: intent,
+        trace: trace,
       );
       if (resolved.stream case ControlledOnlineStream stream) managed = stream;
       if (!isCurrent()) return false;
       await _serializeEngine(() async {
         if (!isCurrent()) return;
+        stage = DiagnosticStage.engine;
+        final input = managed?.input;
+        final medium = switch (input) {
+          ControlledEncodedInput(:final format) =>
+            format == ControlledAudioFormat.mp3
+                ? DiagnosticMedium.mp3
+                : DiagnosticMedium.flac,
+          ControlledPcmInput() => DiagnosticMedium.wave,
+          _ =>
+            resolved.localFile != null
+                ? DiagnosticMedium.file
+                : DiagnosticMedium.directStream,
+        };
+        trace?.record(DiagnosticEvent.engineOpening, {
+          DiagnosticField.medium: medium,
+          DiagnosticField.quality: preferences.quality,
+          DiagnosticField.seekable: switch (input) {
+            ControlledPcmInput(:final seekable) => seekable,
+            ControlledEncodedInput(:final seekable) => seekable,
+            _ => null,
+          },
+        });
         if (managed case final stream?) {
           final player = engine;
           stream.owner.check();
-          final input = stream.input;
           if (input is ControlledPcmInput &&
               player is ControlledPcmAudioEngine) {
             ownedByEngine = true;
@@ -226,9 +275,11 @@ class OnlinePlaybackController extends ChangeNotifier {
         _current = track;
         _external = null;
         _currentUri = resolved.uri;
+        _playingTrace = trace;
         if (managed case final stream?) {
           _watchControlled = stream.owner.listen(() {
             if (_currentUri != resolved.uri || _closed) return;
+            trace?.record(DiagnosticEvent.controlledRevoked);
             _completed = true;
             _playing = false;
             _notify();
@@ -236,6 +287,10 @@ class OnlinePlaybackController extends ChangeNotifier {
         }
         _position = Duration.zero;
         _completed = false;
+        trace?.record(DiagnosticEvent.playbackReady, {
+          DiagnosticField.medium: medium,
+        });
+        committed = true;
       });
       if (!isCurrent()) return false;
       unawaited(continuation.check());
@@ -245,9 +300,17 @@ class OnlinePlaybackController extends ChangeNotifier {
     } on PcmCancelled {
       return false;
     } catch (error) {
-      if (isCurrent()) _report(error);
+      if (isCurrent()) {
+        failed = true;
+        _report(error, stage: stage, trace: trace);
+      }
       return false;
     } finally {
+      if (!committed && !failed) {
+        trace?.record(DiagnosticEvent.playbackCancelled, {
+          DiagnosticField.stage: stage,
+        });
+      }
       if (!ownedByEngine) managed?.input.close();
       if (identical(_intent, intent)) _intent = null;
       if (isCurrent()) {
@@ -262,6 +325,10 @@ class OnlinePlaybackController extends ChangeNotifier {
   Future<void> playLocal(LocalAudioFile file) async {
     if (_closed) throw const PlaybackCancelled();
     final generation = ++_generation;
+    final trace = diagnostics?.begin(DiagnosticOperation.playback);
+    trace?.record(DiagnosticEvent.playbackRequested, {
+      DiagnosticField.medium: DiagnosticMedium.file,
+    });
     _intent?.cancel();
     continuation.stop();
     _loading = true;
@@ -278,6 +345,9 @@ class OnlinePlaybackController extends ChangeNotifier {
           artist: file.metadata.artist.isEmpty ? null : file.metadata.artist,
           album: file.metadata.album.isEmpty ? null : file.metadata.album,
         );
+        trace?.record(DiagnosticEvent.engineOpening, {
+          DiagnosticField.medium: DiagnosticMedium.file,
+        });
         await engine.openQueue([track]);
         if (_closed || generation != _generation) {
           throw const PlaybackCancelled();
@@ -287,8 +357,23 @@ class OnlinePlaybackController extends ChangeNotifier {
         _current = null;
         _external = track;
         _currentUri = track.uri;
+        _playingTrace = trace;
         _position = Duration.zero;
+        trace?.record(DiagnosticEvent.playbackReady, {
+          DiagnosticField.medium: DiagnosticMedium.file,
+        });
       });
+    } on PlaybackCancelled {
+      trace?.record(DiagnosticEvent.playbackCancelled);
+      rethrow;
+    } catch (error) {
+      if (trace?.active == true) {
+        trace!.record(DiagnosticEvent.playbackFailed, {
+          DiagnosticField.stage: DiagnosticStage.engine,
+          ...diagnosticFailure(error),
+        });
+      }
+      rethrow;
     } finally {
       if (!_closed && generation == _generation) {
         _loading = false;
@@ -332,6 +417,7 @@ class OnlinePlaybackController extends ChangeNotifier {
 
   Future<bool> next() async {
     if (_closed || _loading) return false;
+    _action(DiagnosticAction.next);
     final generation = _generation;
     if (_current == null && queue.tracks.isNotEmpty) return select(0);
     if (_current != null) {
@@ -351,6 +437,7 @@ class OnlinePlaybackController extends ChangeNotifier {
       });
       return moved;
     } catch (error) {
+      _action(DiagnosticAction.next, error: error);
       _report(error);
       return false;
     }
@@ -358,6 +445,7 @@ class OnlinePlaybackController extends ChangeNotifier {
 
   Future<bool> previous() async {
     if (_closed || _loading) return false;
+    _action(DiagnosticAction.previous);
     if (_current != null) {
       return queue.currentIndex > 0 ? select(queue.currentIndex - 1) : false;
     }
@@ -371,6 +459,7 @@ class OnlinePlaybackController extends ChangeNotifier {
       });
       return moved;
     } catch (error) {
+      _action(DiagnosticAction.previous, error: error);
       _report(error);
       return false;
     }
@@ -378,6 +467,8 @@ class OnlinePlaybackController extends ChangeNotifier {
 
   Future<void> togglePlay() async {
     if (_closed || _loading) return;
+    final action = _playing ? DiagnosticAction.pause : DiagnosticAction.play;
+    _action(action);
     if (_current != null && _completed) {
       await select(queue.currentIndex);
       return;
@@ -395,23 +486,47 @@ class OnlinePlaybackController extends ChangeNotifier {
         }
       });
     } catch (error) {
+      _action(action, error: error);
       _report(error);
     }
   }
 
   Future<void> seek(Duration target) async {
     if (_closed || _loading) return;
+    _action(DiagnosticAction.seek, target: target);
     try {
       final generation = _generation;
       await _serializeEngine(() async {
         if (!_closed && generation == _generation) await engine.seek(target);
       });
     } catch (error) {
+      _action(DiagnosticAction.seek, error: error);
       _report(error);
     }
   }
 
-  Future<bool> retry() => _retry?.call() ?? Future.value(false);
+  Future<bool> retry() {
+    _action(DiagnosticAction.retry);
+    return _retry?.call() ?? Future.value(false);
+  }
+
+  void _action(DiagnosticAction action, {Duration? target, Object? error}) {
+    if (diagnostics?.enabled != true) return;
+    final event = error == null
+        ? DiagnosticEvent.playbackAction
+        : DiagnosticEvent.playbackActionFailed;
+    final facts = {
+      DiagnosticField.action: action,
+      DiagnosticField.positionMs: (target ?? _position).inMilliseconds,
+      if (error != null) ...diagnosticFailure(error),
+    };
+    final trace = _playingTrace;
+    if (trace?.active == true) {
+      trace!.record(event, facts);
+    } else {
+      diagnostics!.record(event, facts);
+    }
+  }
 
   Future<void> _serializeEngine(Future<void> Function() action) {
     final result = _engineTail.then((_) => action());
@@ -433,6 +548,7 @@ class OnlinePlaybackController extends ChangeNotifier {
       queue.clear();
       _current = null;
       _external = snapshot.currentTrack;
+      _playingTrace = null;
       _currentUri = snapshot.currentTrack?.uri;
     }
     _notify();
@@ -443,8 +559,16 @@ class OnlinePlaybackController extends ChangeNotifier {
     _watchControlled = null;
   }
 
-  void _report(Object error) {
+  void _report(Object error, {DiagnosticStage? stage, DiagnosticTrace? trace}) {
     if (_closed) return;
+    if (stage != null && diagnostics?.enabled == true) {
+      final facts = {DiagnosticField.stage: stage, ...diagnosticFailure(error)};
+      if (trace == null) {
+        diagnostics!.record(DiagnosticEvent.playbackFailed, facts);
+      } else {
+        trace.record(DiagnosticEvent.playbackFailed, facts);
+      }
+    }
     _error = switch (error) {
       OnlineException value => value.toString(),
       LibraryPlaybackException value => value.toString(),

@@ -92,7 +92,7 @@ jobs:
           MOTIF_TEST_KEY_ALIAS: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) && secrets.MOTIF_TEST_KEY_ALIAS || '' }}
           MOTIF_TEST_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/test-')) && secrets.MOTIF_TEST_KEY_PASSWORD || '' }}
         run: |
-          args=(build apk --release --no-pub)
+          args=(build apk --release --no-pub "--dart-define=MOTIF_BUILD_SHA=$GITHUB_SHA")
           if [[ "$MOTIF_LX_APP_FIXTURE" == "true" ]]; then
             args+=(--dart-define=MOTIF_LX_APP_FIXTURE=true)
           fi
@@ -142,7 +142,7 @@ jobs:
           MOTIF_LX_APP_FIXTURE: ${{ github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/test-') && inputs.lx_fixture) }}
         shell: pwsh
         run: |
-          $flutterArgs = @('build', 'windows', '--release', '--no-pub')
+          $flutterArgs = @('build', 'windows', '--release', '--no-pub', "--dart-define=MOTIF_BUILD_SHA=$env:GITHUB_SHA")
           if ($env:MOTIF_LX_APP_FIXTURE -eq 'true') {
             $flutterArgs += '--dart-define=MOTIF_LX_APP_FIXTURE=true'
           }

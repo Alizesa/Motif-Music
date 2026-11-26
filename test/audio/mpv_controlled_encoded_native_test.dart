@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,7 @@ import 'package:motif/audio/controlled_encoded.dart';
 import 'package:motif/audio/controlled_pcm.dart';
 import 'package:motif/audio/audio_engine.dart';
 import 'package:motif/audio/mpv_audio_engine.dart';
+import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/online/lx/lx_audio_media.dart';
 
 import '../support/lx_encoded_fixture.dart';
@@ -22,7 +24,8 @@ void main() {
           resumePlayback: false,
         ),
       );
-      final engine = MpvAudioEngine(player: player);
+      final recorder = DiagnosticRecorder()..setEnabled(true);
+      final engine = MpvAudioEngine(player: player, diagnostics: recorder);
       final transport = EncodedFixtureTransport(mp3Fixture())
         ..tag = null
         ..ranges = false;
@@ -45,6 +48,21 @@ void main() {
             .firstWhere((value) => value > const Duration(milliseconds: 30))
             .timeout(const Duration(seconds: 8));
         expect(input.seekable, isFalse);
+        final log = utf8.decode(
+          recorder.export({
+            DiagnosticSection.player: engine.diagnosticSnapshot(),
+          }).bytes,
+        );
+        final events = (jsonDecode(log) as Map)['events'] as List;
+        expect(
+          events.any(
+            (event) =>
+                event['event'] == 'nativePlaying' && event['playing'] == true,
+          ),
+          isTrue,
+        );
+        expect(log, isNot(contains('127.0.0.1')));
+        expect(log, isNot(contains('Sequential MP3')));
         await expectLater(
           engine.seek(const Duration(seconds: 4)),
           throwsStateError,
@@ -54,6 +72,7 @@ void main() {
       } finally {
         await subscription.cancel();
         await engine.dispose();
+        recorder.dispose();
       }
       expect(transport.readers.every((reader) => reader.closed), isTrue);
     },

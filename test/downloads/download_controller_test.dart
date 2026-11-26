@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/controlled_pcm.dart';
+import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/downloads/download_controller.dart';
 import 'package:motif/downloads/download_destination.dart';
 import 'package:motif/online/domain/download_source.dart';
@@ -23,10 +25,13 @@ void main() {
   late _Source source;
   late _Destination destination;
   late DownloadController controller;
+  late DiagnosticRecorder diagnostics;
   setUp(() {
     source = _Source();
     destination = _Destination();
+    diagnostics = DiagnosticRecorder();
     controller = DownloadController(
+      diagnostics: diagnostics,
       sources: MusicSourceRegistry(
         qq: _Qq(),
         thirdPartySources: [
@@ -39,6 +44,7 @@ void main() {
   tearDown(() async {
     await controller.close();
     controller.dispose();
+    diagnostics.dispose();
   });
 
   test('no directory means no file and no source request', () async {
@@ -85,6 +91,7 @@ void main() {
   test(
     'retry reuses the failed task, clears progress and uses a fresh file',
     () async {
+      diagnostics.setEnabled(true);
       await controller.chooseDirectory();
       source.fail = true;
       await controller.start(track, 'test', OnlineQuality.standard);
@@ -121,6 +128,22 @@ void main() {
       expect(destination.writers.last.bytes.length, 8);
       await controller.retry(failed);
       expect(source.calls, 2, reason: 'a completed task cannot be retried');
+      final text = utf8.decode(diagnostics.export({}).bytes);
+      final events = (jsonDecode(text) as Map)['events'] as List;
+      final attempts = events.where(
+        (entry) => entry['event'] == 'downloadRequested',
+      );
+      expect(attempts.map((entry) => entry['task']), [1, 1]);
+      expect(attempts.map((entry) => entry['attempt']), [1, 2]);
+      expect(attempts.map((entry) => entry['operationId']), [1, 2]);
+      expect(
+        events
+            .where((entry) => entry['event'] == 'downloadFinished')
+            .map((entry) => entry['state']),
+        ['failed', 'completed'],
+      );
+      expect(text, isNot(contains('file:///')));
+      expect(text, isNot(contains(track.title)));
     },
   );
 
@@ -219,6 +242,7 @@ class _Source implements PlaybackUrlResolver, TrackDownloadSource {
     required PcmCancellation cancellation,
     required DownloadWrite write,
     required void Function(int) onTotal,
+    DiagnosticTrace? trace,
   }) async {
     calls++;
     if (!started.isCompleted) started.complete();

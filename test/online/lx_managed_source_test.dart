@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/audio_engine.dart';
+import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/audio/controlled_pcm.dart';
 import 'package:motif/audio/controlled_encoded.dart';
 import 'package:motif/library/domain/local_playback_matcher.dart';
@@ -913,15 +914,54 @@ void main() {
     },
   );
 
+  test('transfer trace captures LX timing and API candidate results without header or URL data', () async {
+    final recorder = DiagnosticRecorder()..setEnabled(true);
+    addTearDown(recorder.dispose);
+    final id = await enable();
+    final trace = recorder.begin(DiagnosticOperation.download)!;
+    requestAttempts = 2;
+    useLastCandidate = true;
+    transientFailures = 1;
+    expect(
+      await registry.download(
+        id,
+        track,
+        OnlineQuality.standard,
+        cancellation: PcmCancellation(),
+        trace: trace,
+        write: (_) async {},
+        onTotal: (_) {},
+      ),
+      'mp3',
+    );
+    final text = utf8.decode(recorder.export({}).bytes);
+    final log = (jsonDecode(text) as Map)['events'] as List;
+    expect(log.every((row) => row['operationId'] == trace.id), isTrue);
+    final errors = log.where((row) => row['event'] == 'lxApiFailure').toList();
+    expect(errors.map((row) => row['reason']), ['apiAddress', 'timeout']);
+    expect(errors.last['candidate'], 2);
+    final reply = log.singleWhere((row) => row['event'] == 'lxApiResponse');
+    expect(reply['status'], 200);
+    expect(reply['candidate'], 3);
+    expect(reply['elapsedMs'], isA<int>());
+    expect(log.last['medium'], 'mp3');
+    for (final secret in [_api, _media, mediaUrl, id, '127.0.0.1']) {
+      expect(text, isNot(contains(secret)));
+    }
+  });
+
   test('a download uses a full GET with a fixed media User-Agent on each checked hop', () async {
     final calls = <Uri>[];
     final bytes = mp3Fixture();
     final reader = EncodedFixtureRead(bytes, 0);
     final redirect = _Read();
     final work = PcmCancellation();
+    final recorder = DiagnosticRecorder()..setEnabled(true);
+    addTearDown(recorder.dispose);
     final transport = LxMediaTransport.download(
-      Uri.https(_media, '/song'),
+      Uri.https(_media, '/song', {'key': 'private-query-value'}),
       work,
+      trace: recorder.begin(DiagnosticOperation.download),
       open: (uri, headers, _) async {
         calls.add(uri);
         if (headers.containsKey('range') ||
@@ -963,6 +1003,13 @@ void main() {
     expect(saved.takeBytes(), bytes);
     expect(redirect.closed, isTrue);
     expect(reader.closed, isTrue);
+    final text = utf8.decode(recorder.export({}).bytes);
+    final responses = (jsonDecode(text) as Map)['events'] as List;
+    expect(responses.map((entry) => entry['status']), [302, 200]);
+    expect(responses.map((entry) => entry['ranged']), [false, false]);
+    expect(responses.map((entry) => entry['redirects']), [0, 1]);
+    expect(text, isNot(contains('private-query-value')));
+    expect(text, isNot(contains(_media)));
   });
 
   test(

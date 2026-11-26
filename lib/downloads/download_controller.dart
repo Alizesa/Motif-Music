@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../audio/controlled_pcm.dart';
+import '../diagnostics/diagnostic_failure.dart';
+import '../diagnostics/diagnostic_recorder.dart';
 import '../online/domain/music_source_registry.dart';
 import '../online/domain/online_error.dart';
 import '../online/domain/playback_source.dart';
@@ -21,7 +23,15 @@ enum DownloadStatus {
 }
 
 final class DownloadTask {
-  DownloadTask._(this.track, this.sourceId, this.quality, this._directory);
+  DownloadTask._(
+    this._id,
+    this.track,
+    this.sourceId,
+    this.quality,
+    this._directory,
+  );
+  final int _id;
+  int _attempt = 0;
   final QqTrack track;
   final String sourceId;
   final OnlineQuality quality;
@@ -45,8 +55,14 @@ final class DownloadTask {
 /// One explicit transfer at a time; retry always re-resolves an expiring URL.
 /// Only local task metadata is retained, never media URLs or script credentials.
 final class DownloadController extends ChangeNotifier {
-  DownloadController({required this.sources, required this.destination});
+  DownloadController({
+    required this.sources,
+    required this.destination,
+    this.diagnostics,
+  });
+  final DiagnosticRecorder? diagnostics;
   final MusicSourceRegistry sources;
+  int _nextTask = 0;
   final DownloadDestination destination;
   final List<DownloadTask> _tasks = [];
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
@@ -83,7 +99,7 @@ final class DownloadController extends ChangeNotifier {
       _notify();
       return Future.value();
     }
-    final task = DownloadTask._(track, sourceId, quality, target);
+    final task = DownloadTask._(++_nextTask, track, sourceId, quality, target);
     _tasks.insert(0, task);
     if (_tasks.length > 50) _tasks.removeLast();
     return _begin(task);
@@ -111,8 +127,15 @@ final class DownloadController extends ChangeNotifier {
     _active = task;
     final work = _work = PcmCancellation();
     error = null;
+    final trace = diagnostics?.begin(DiagnosticOperation.download);
+    task._attempt++;
+    trace?.record(DiagnosticEvent.downloadRequested, {
+      DiagnosticField.task: task._id,
+      DiagnosticField.attempt: task._attempt,
+      DiagnosticField.quality: task.quality,
+    });
     // Publish the future before notifying; a listener can cancel or close now.
-    final running = _running = Future.microtask(() => _run(task, work));
+    final running = _running = Future.microtask(() => _run(task, work, trace));
     _notify();
     return running;
   }
@@ -121,8 +144,26 @@ final class DownloadController extends ChangeNotifier {
     if (_active?.status != DownloadStatus.saving) _work?.cancel();
   }
 
-  Future<void> _run(DownloadTask task, PcmCancellation work) async {
+  DiagnosticFacts diagnosticSnapshot() => {
+    DiagnosticField.taskCount: _tasks.length,
+    DiagnosticField.directorySelected: directory != null,
+    DiagnosticField.active: busy,
+    if (_active case final task?) ...{
+      DiagnosticField.task: task._id,
+      DiagnosticField.attempt: task._attempt,
+      DiagnosticField.state: task.status,
+      DiagnosticField.bytes: task.received,
+      DiagnosticField.totalBytes: task.total,
+    },
+  };
+
+  Future<void> _run(
+    DownloadTask task,
+    PcmCancellation work,
+    DiagnosticTrace? trace,
+  ) async {
     DownloadWriter? writer;
+    var stage = DiagnosticStage.directory;
     var committed = false;
     var notifiedAt = DateTime.fromMillisecondsSinceEpoch(0);
     try {
@@ -130,11 +171,13 @@ final class DownloadController extends ChangeNotifier {
       final output = await destination.create(task.directory);
       writer = output;
       work.check();
+      stage = DiagnosticStage.transfer;
       final extension = await sources.download(
         task.sourceId,
         task.track,
         task.quality,
         cancellation: work,
+        trace: trace,
         write: (bytes) async {
           work.check();
           await output.write(bytes);
@@ -148,11 +191,18 @@ final class DownloadController extends ChangeNotifier {
           }
         },
         onTotal: (total) {
+          trace?.record(DiagnosticEvent.downloadBody, {
+            DiagnosticField.totalBytes: total,
+          });
           task._total = total;
           _notify();
         },
       );
       work.check();
+      stage = DiagnosticStage.save;
+      trace?.record(DiagnosticEvent.downloadSaving, {
+        DiagnosticField.bytes: task.received,
+      });
       task._status = DownloadStatus.saving;
       _notify();
       work.check();
@@ -162,6 +212,10 @@ final class DownloadController extends ChangeNotifier {
       );
       committed = true;
       task._status = DownloadStatus.completed;
+      trace?.record(DiagnosticEvent.downloadFinished, {
+        DiagnosticField.state: task.status,
+        DiagnosticField.bytes: task.received,
+      });
     } catch (failure) {
       task._status = work.cancelled
           ? DownloadStatus.cancelled
@@ -173,11 +227,20 @@ final class DownloadController extends ChangeNotifier {
           : _isDestinationFailure(failure)
           ? '无法写入文件，请检查保存目录权限和可用空间。'
           : '下载未完成，请检查音源和保存目录后重试。';
+      if (trace?.active == true) {
+        trace!.record(DiagnosticEvent.downloadFinished, {
+          DiagnosticField.stage: stage,
+          DiagnosticField.state: task.status,
+          DiagnosticField.bytes: task.received,
+          if (!work.cancelled) ...diagnosticFailure(failure),
+        });
+      }
     } finally {
       if (!committed && writer != null) {
         try {
           await writer.abort();
         } catch (_) {
+          trace?.record(DiagnosticEvent.downloadCleanupFailure);
           task._error = '临时文件未能清理，请检查保存目录后重试。';
         }
       }

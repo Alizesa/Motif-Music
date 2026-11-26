@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:mpv_audio_kit/mpv_audio_kit.dart';
 
+import '../diagnostics/diagnostic_failure.dart';
+import '../diagnostics/diagnostic_recorder.dart';
 import 'audio_engine.dart';
 import 'controlled_pcm.dart';
 import 'controlled_encoded.dart';
@@ -15,7 +17,7 @@ final class MpvAudioEngine
         ApplicationQueueAudioEngine,
         ControlledPcmAudioEngine,
         ControlledEncodedAudioEngine {
-  MpvAudioEngine({PlayerApi? player})
+  MpvAudioEngine({PlayerApi? player, this.diagnostics})
     : _player =
           player ??
           Player(
@@ -24,9 +26,14 @@ final class MpvAudioEngine
               initialVolume: 75.0,
               resumePlayback: false,
             ),
-          );
+          ) {
+    diagnostics?.addListener(_updateDiagnostics);
+    _updateDiagnostics();
+  }
 
   final PlayerApi _player;
+  final DiagnosticRecorder? diagnostics;
+  final _diagnosticSubscriptions = <StreamSubscription<void>>[];
   final List<double> _equalizerGains = List<double>.filled(10, 0);
   final _controlledErrors = StreamController<String>.broadcast();
   final _mediaChange = StreamController<void>.broadcast();
@@ -41,6 +48,133 @@ final class MpvAudioEngine
   (_ControlledTrack, PcmCancellation)? _switchingSegment;
   bool _disposed = false;
   bool _applicationNavigation = false;
+
+  void _updateDiagnostics() {
+    final recorder = diagnostics;
+    if (recorder == null || _disposed) return;
+    if (!recorder.enabled) {
+      unawaited(_stopDiagnostics());
+      return;
+    }
+    if (_diagnosticSubscriptions.isNotEmpty) return;
+    final stream = _player.stream;
+    _diagnosticSubscriptions.addAll([
+      stream.error.listen(_recordNativeError),
+      stream.buffering.distinct().listen(
+        (value) => recorder.record(DiagnosticEvent.nativeBuffering, {
+          DiagnosticField.buffering: value,
+          DiagnosticField.positionMs:
+              _player.state.playback.position.inMilliseconds,
+          DiagnosticField.durationMs:
+              _player.state.playback.duration.inMilliseconds,
+        }),
+      ),
+      stream.playing.distinct().listen(
+        (value) => recorder.record(DiagnosticEvent.nativePlaying, {
+          DiagnosticField.playing: value,
+          DiagnosticField.positionMs:
+              _player.state.playback.position.inMilliseconds,
+        }),
+      ),
+      stream.endFile.listen(
+        (event) => recorder.record(DiagnosticEvent.nativeEnd, {
+          DiagnosticField.reason: event.reason,
+          DiagnosticField.code: event.error,
+          DiagnosticField.positionMs: event.position?.inMilliseconds,
+          DiagnosticField.durationMs: event.duration?.inMilliseconds,
+          DiagnosticField.readError: event.readError,
+          DiagnosticField.skippedSegments: event.skippedSegments,
+        }),
+      ),
+      stream.audioParams
+          .map(_signal)
+          .distinct()
+          .listen(
+            (signal) => recorder.record(
+              DiagnosticEvent.nativeAudioFormat,
+              _audioFormatFacts(signal),
+            ),
+          ),
+    ]);
+  }
+
+  Future<void> _stopDiagnostics() async {
+    final pending = _diagnosticSubscriptions
+        .map((item) => item.cancel())
+        .toList();
+    _diagnosticSubscriptions.clear();
+    await Future.wait(pending);
+  }
+
+  static ({Format? format, int? rate, int? channels}) _signal(
+    AudioParams params,
+  ) => (
+    format: params.format,
+    rate: params.sampleRate,
+    channels: params.channelCount,
+  );
+
+  static DiagnosticFacts _audioFormatFacts(
+    ({Format? format, int? rate, int? channels}) signal,
+  ) => {
+    DiagnosticField.sampleFormat: signal.format,
+    DiagnosticField.sampleRate: signal.rate,
+    DiagnosticField.channels: signal.channels,
+  };
+
+  DiagnosticFacts diagnosticSnapshot() {
+    final state = _player.state;
+    final version = RegExp(r'\bv?([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\b')
+        .firstMatch(state.versions.mpvVersion);
+    return {
+      if (version != null) ...{
+        DiagnosticField.mpvMajor: int.parse(version[1]!),
+        DiagnosticField.mpvMinor: int.parse(version[2]!),
+        DiagnosticField.mpvPatch: int.parse(version[3]!),
+      },
+      ..._audioFormatFacts(_signal(state.file.audioParams)),
+      DiagnosticField.audioBitrate: state.file.audioBitrate,
+      DiagnosticField.outputRate: state.output.audioOutParams.sampleRate,
+      DiagnosticField.outputState: state.output.audioOutputState,
+      DiagnosticField.volume: state.settings.volume,
+      DiagnosticField.gainDb: state.settings.volumeGain,
+      DiagnosticField.playing: state.playback.playing,
+      DiagnosticField.playWhenReady: state.playback.playWhenReady,
+      DiagnosticField.buffering: state.network.buffering,
+      DiagnosticField.seekable:
+          _encoded?.input.seekable ??
+          _controlled?.input.seekable ??
+          state.playback.seekable,
+      DiagnosticField.readError: state.network.readError,
+    };
+  }
+
+  void _recordNativeError(PlayerError error) {
+    final recorder = diagnostics;
+    if (recorder == null || !recorder.enabled) return;
+    switch (error) {
+      case EndFileError(:final reason, :final code):
+        recorder.record(DiagnosticEvent.nativeError, {
+          DiagnosticField.reason: reason,
+          DiagnosticField.code: code,
+        });
+      case LogError(:final level, :final prefix):
+        recorder.record(DiagnosticEvent.nativeLogError, {
+          DiagnosticField.state: level,
+          DiagnosticField.subsystem: switch (prefix.split('/').first) {
+            'ao' => _DiagnosticNativeSubsystem.audioOutput,
+            'ad' => _DiagnosticNativeSubsystem.decoder,
+            'af' => _DiagnosticNativeSubsystem.filter,
+            'ffmpeg' => _DiagnosticNativeSubsystem.ffmpeg,
+            'demux' => _DiagnosticNativeSubsystem.demux,
+            'stream' => _DiagnosticNativeSubsystem.stream,
+            'lavf' => _DiagnosticNativeSubsystem.lavf,
+            'cplayer' => _DiagnosticNativeSubsystem.player,
+            _ => _DiagnosticNativeSubsystem.other,
+          },
+        });
+    }
+  }
 
   @override
   Stream<bool> get playWhenReady => _player.stream.playWhenReady;
@@ -143,13 +277,13 @@ final class MpvAudioEngine
 
   @override
   Stream<String> get errors => Stream.multi((events) {
-    final native = _player.stream.error.listen(
-      (error) => events.add(
+    final native = _player.stream.error.listen((error) {
+      events.add(
         _controlled == null && _encoded == null
             ? '$error'
             : '音频解码或读取失败，请换一个音源重试。',
-      ),
-    );
+      );
+    });
     final controlled = _controlledErrors.stream.listen(
       events.add,
       onDone: events.close,
@@ -291,7 +425,11 @@ final class MpvAudioEngine
     try {
       if (_disposed) throw const PcmCancelled();
       operation.check();
-      final server = await ControlledAudioServer.open(input, operation);
+      final server = await ControlledAudioServer.open(
+        input,
+        operation,
+        diagnostics: diagnostics,
+      );
       track.server = server;
       await _serializeMedia(() async {
         operation.check();
@@ -380,7 +518,13 @@ final class MpvAudioEngine
           option.value,
         );
       }
-    } catch (_) {
+    } catch (error) {
+      if (diagnostics?.enabled == true) {
+        diagnostics!.record(
+          DiagnosticEvent.controlledDecoderFailure,
+          diagnosticFailure(error),
+        );
+      }
       // A load must fail closed if any decoder restriction could not be set.
       try {
         await _player.setRawProperty(
@@ -578,8 +722,14 @@ final class MpvAudioEngine
       }
     } on PcmCancelled {
       // A successor or a revoke owns native teardown.
-    } catch (_) {
+    } catch (error) {
       if (identical(_controlled, track) && identical(track.segment, segment)) {
+        if (diagnostics?.enabled == true) {
+          diagnostics!.record(
+            DiagnosticEvent.controlledReadFailure,
+            diagnosticFailure(error),
+          );
+        }
         _controlledErrors.add('受控音频读取失败。');
         final retired = _takeControlled();
         try {
@@ -695,6 +845,8 @@ final class MpvAudioEngine
   Future<void> dispose() => _closing ??= _dispose();
 
   Future<void> _dispose() async {
+    diagnostics?.removeListener(_updateDiagnostics);
+    final stoppingDiagnostics = _stopDiagnostics();
     _disposed = true;
     _pending?.cancel();
     final active = _takeControlled();
@@ -706,6 +858,7 @@ final class MpvAudioEngine
         active?.segment?.source.abort();
       });
     } finally {
+      await stoppingDiagnostics;
       await _controlledErrors.close();
       await _mediaChange.close();
     }
@@ -790,3 +943,15 @@ const equalizerCentersHz = <double>[
   8000.0,
   16000.0,
 ];
+
+enum _DiagnosticNativeSubsystem {
+  audioOutput,
+  decoder,
+  filter,
+  ffmpeg,
+  demux,
+  stream,
+  lavf,
+  player,
+  other,
+}
