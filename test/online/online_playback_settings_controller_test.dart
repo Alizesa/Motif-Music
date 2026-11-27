@@ -46,6 +46,61 @@ void main() {
     }
   });
 
+  test('one source editor projects the active legacy route without activating a download-only list', () {
+    OnlinePlaybackPreferences old(String primary, List<String> scripts) =>
+        OnlinePlaybackPreferences.fromJson({
+          'version': 2,
+          'preferredSourceId': primary,
+          'fallbackSourceId': 'Q',
+          'quality': 'high',
+          'scriptOrder': scripts,
+        });
+    final single = old('A', ['X', 'Y']);
+    expect(single.selectedPrimary, 'A');
+    expect(single.selectedBackups, ['Q']);
+    expect(single.copyWith(quality: OnlineQuality.standard).downloadOrder, [
+      'X',
+      'Y',
+    ]);
+    final ordered = old('lx:ordered', ['B', 'A', 'C']);
+    expect(ordered.selectedPrimary, 'B');
+    expect(ordered.selectedBackups, ['A', 'C']);
+    final empty = old('lx:ordered', []);
+    expect(empty.selectedPrimary, isNull);
+    expect(empty.selectedBackups, isEmpty);
+    expect(() => empty.copyWith(fallbackOrder: ['A']), throwsArgumentError);
+    expect(ordered.copyWith(fallbackOrder: ['A', 'C']).preferredSourceId, 'B');
+    final edited = ordered.copyWith(
+      preferredSourceId: 'C',
+      fallbackOrder: ['A', 'C', 'qq', 'A', 'B'],
+    );
+    final again = OnlinePlaybackPreferences.fromJson(
+      edited.copyWith(quality: OnlineQuality.lossless).toJson(),
+    );
+    expect(again.toJson()['version'], 3);
+    expect(again.selectedPrimary, 'C');
+    expect(again.fallbackOrder, ['A', 'qq', 'B']);
+    expect(again.downloadOrder, ['C', 'A', 'B']);
+    expect(again.quality, OnlineQuality.lossless);
+    expect(again.copyWith(fallbackOrder: []).selectedBackups, isEmpty);
+    for (final bad in [
+      null,
+      'A',
+      [''],
+      [32],
+      ['lx:ordered'],
+      List.filled(33, 'x'),
+    ]) {
+      expect(
+        () => OnlinePlaybackPreferences.fromJson({
+          ...again.toJson(),
+          'fallbackOrder': bad,
+        }),
+        throwsFormatException,
+      );
+    }
+  });
+
   test('failed preference loading can be retried', () async {
     final store = MemoryPlaybackPreferencesStore()
       ..loadError = StateError('read failed');

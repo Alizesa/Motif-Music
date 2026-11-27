@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -8,6 +9,7 @@ import 'package:motif/features/settings/music_source_settings_page.dart';
 import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/lx/lx_source_manager.dart';
 import 'package:motif/online/lx/lx_source_store.dart';
+import 'package:motif/settings/online_playback_preferences.dart';
 import 'package:motif/settings/online_playback_settings_controller.dart';
 
 import '../online/playback_fakes.dart';
@@ -15,14 +17,42 @@ import '../support/ordered_script_stub.dart';
 
 import 'package:motif/online/lx/lx_ordered_source.dart';
 
+Future<void> _choosePrimary(WidgetTester t, String id) async {
+  await t.tap(find.byKey(const ValueKey('primary-source')));
+  await t.pumpAndSettle();
+  await t.tap(find.byKey(ValueKey('primary-option-$id')).hitTestable().last);
+  await t.pumpAndSettle();
+}
+
+Future<void> _move(
+  WidgetTester t,
+  String from,
+  String to,
+  PointerDeviceKind kind,
+) async {
+  final grip = find.byKey(ValueKey('drag-$from'));
+  final start = t.getCenter(grip);
+  final end = t.getCenter(find.byKey(ValueKey('drag-$to')));
+  final gesture = await t.startGesture(start, kind: kind);
+  // Cross each row's insertion gap with real pointer updates. Jumping past
+  // the target in one frame can land after it rather than before it.
+  for (var i = 1; i <= 16; i++) {
+    await gesture.moveTo(Offset.lerp(start, end, i / 16)!);
+    await t.pump(const Duration(milliseconds: 20));
+  }
+  await t.pumpAndSettle();
+  await gesture.up();
+  await t.pumpAndSettle();
+}
+
 void main() {
   testWidgets(
-    'scripts must be checked and can be reordered before selecting ordered playback',
+    'check backups directly and reorder using the handle with touch and mouse',
     (t) async {
       final store = MemoryPlaybackPreferencesStore();
       final settings = OnlinePlaybackSettingsController(store);
       final sources = MusicSourceRegistry(qq: FakePlaybackSource('qq'));
-      for (final id in ['A', 'B']) {
+      for (final id in ['A', 'B', 'C']) {
         sources.registerManaged(
           MusicSourceRegistration(name: id, resolver: OrderedScriptStub(id)),
         );
@@ -33,40 +63,79 @@ void main() {
         ),
       );
       await t.pumpAndSettle();
-      Future<void> tap(String key) async {
-        final f = find.byKey(ValueKey(key));
-        // Lazy list entries may exist in the cache above the viewport after
-        // reordering. Use real scroll gestures until the actual tile is hittable.
-        for (var i = 0; i < 12 && f.hitTestable().evaluate().isEmpty; i++) {
-          await t.drag(
-            find.byType(ListView),
-            Offset(0, key == 'preferred-ordered' ? 200 : -175),
-          );
-          await t.pumpAndSettle();
-        }
-        expect(f.hitTestable(), findsOneWidget);
-        await t.tap(f.hitTestable());
+      expect(find.text('换源顺序'), findsNothing);
+      expect(find.text('按顺序换源'), findsNothing);
+      expect(find.byKey(const ValueKey('backup-qq')), findsNothing);
+      for (final id in ['A', 'B', 'C']) {
+        await t.tap(find.byKey(ValueKey('backup-$id')));
         await t.pumpAndSettle();
       }
+      expect(store.value.fallbackOrder, ['A', 'B', 'C']);
+      expect(store.value.preferredSourceId, 'qq');
+      await _move(t, 'C', 'A', PointerDeviceKind.touch);
+      expect(store.value.fallbackOrder, ['C', 'A', 'B']);
+      await _move(t, 'C', 'B', PointerDeviceKind.mouse);
+      expect(store.value.fallbackOrder, ['A', 'B', 'C']);
+      await _choosePrimary(t, 'B');
+      expect(store.value.fallbackOrder, ['A', 'C']);
+      expect(find.byKey(const ValueKey('backup-B')), findsNothing);
+      for (final id in ['A', 'C']) {
+        await t.tap(find.byKey(ValueKey('backup-$id')));
+        await t.pumpAndSettle();
+      }
+      expect(store.value.fallbackOrder, isEmpty);
+      expect(store.value.preferredSourceId, 'B');
+      await t.pumpWidget(const SizedBox.shrink());
+      settings.dispose();
+      sources.close();
+    },
+  );
 
-      expect(store.value.scriptOrder, isEmpty);
+  testWidgets(
+    'old ordered choice is displayed without a write; failed drag restores saved order',
+    (t) async {
+      final store = MemoryPlaybackPreferencesStore()
+        ..value = const OnlinePlaybackPreferences(
+          preferredSourceId: lxOrderedSourceId,
+          scriptOrder: ['C', 'B', 'A'],
+          fallbackSourceId: 'qq',
+        );
+      final settings = OnlinePlaybackSettingsController(store);
+      final sources = MusicSourceRegistry(qq: FakePlaybackSource('qq'));
+      for (final id in ['A', 'B', 'C']) {
+        sources.registerManaged(
+          MusicSourceRegistration(name: id, resolver: OrderedScriptStub(id)),
+        );
+      }
+      await t.pumpWidget(
+        MaterialApp(
+          home: MusicSourceSettingsPage(settings: settings, sources: sources),
+        ),
+      );
+      await t.pumpAndSettle();
       expect(
         t
-            .widget<RadioListTile<String>>(
-              find.byKey(const ValueKey('preferred-ordered')),
+            .widget<DropdownButton<String>>(
+              find.byKey(const ValueKey('primary-source')),
             )
-            .enabled,
-        isFalse,
+            .value,
+        'C',
       );
-      await tap('order-A');
-      await tap('order-B');
-      expect(store.value.scriptOrder, ['A', 'B']);
-      await tap('order-up-B');
-      expect(store.value.scriptOrder, ['B', 'A']);
-      await tap('preferred-ordered');
-      expect(store.value.preferredSourceId, lxOrderedSourceId);
-      await tap('order-B');
-      expect(store.value.scriptOrder, ['A']);
+      expect(
+        t
+            .widget<CheckboxListTile>(find.byKey(const ValueKey('backup-qq')))
+            .value,
+        false,
+      );
+      expect(store.saves, 0);
+      store.saveError = StateError('full');
+      await _move(t, 'A', 'B', PointerDeviceKind.touch);
+      expect(find.text('保存失败，请重试。'), findsOneWidget);
+      expect(store.value.scriptOrder, ['C', 'B', 'A']);
+      expect(
+        t.getCenter(find.byKey(const ValueKey('drag-B'))).dy,
+        lessThan(t.getCenter(find.byKey(const ValueKey('drag-A'))).dy),
+      );
       await t.pumpWidget(const SizedBox.shrink());
       settings.dispose();
       sources.close();
@@ -128,13 +197,16 @@ void main() {
         );
         await tester.pumpAndSettle();
         final id = managed.sources.single.id;
-        await tester.tap(find.byKey(ValueKey('preferred-$id')));
+        await _choosePrimary(tester, id);
         await tester.pumpAndSettle();
         expect(store.value.preferredSourceId, id);
         expect(find.byType(AlertDialog), findsNothing);
         expect(find.byType(TextField), findsNothing);
         expect(find.text('域名授权'), findsNothing);
         final channel = find.byKey(ValueKey('platform-$id'));
+        expect(channel, findsNothing);
+        await tester.tap(find.byKey(const PageStorageKey('manage-scripts')));
+        await tester.pumpAndSettle();
         await tester.scrollUntilVisible(
           channel,
           200,
@@ -193,13 +265,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('preferred-custom')));
+      await _choosePrimary(tester, 'custom');
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.byKey(const ValueKey('fallback-qq')));
-      await tester.tap(find.byKey(const ValueKey('fallback-qq')));
+      await tester.ensureVisible(find.byKey(const ValueKey('backup-qq')));
+      await tester.tap(find.byKey(const ValueKey('backup-qq')));
       await tester.pumpAndSettle();
       expect(store.value.preferredSourceId, 'custom');
-      expect(store.value.fallbackSourceId, 'qq');
+      expect(store.value.fallbackOrder, ['qq']);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
       settings.dispose();
@@ -229,7 +301,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('preferred-custom')));
+      await _choosePrimary(tester, 'custom');
       await tester.pumpAndSettle();
       expect(settings.value.preferredSourceId, 'qq');
       expect(find.text('保存失败，请重试。'), findsOneWidget);

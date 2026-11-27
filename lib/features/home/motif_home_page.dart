@@ -132,7 +132,7 @@ class _MotifHomePageState extends State<MotifHomePage>
     _downloads = DownloadController(
       sources: _sources,
       destination: const PlatformDownloadDestination(),
-      currentScriptOrder: () => _settings.value.scriptOrder,
+      currentScriptOrder: () => _settings.value.downloadOrder,
       directoryStore: FileDownloadDirectoryStore(() async {
         final support = await getApplicationSupportDirectory();
         return File.fromUri(
@@ -365,8 +365,11 @@ class _MotifHomePageState extends State<MotifHomePage>
       context,
       controller: _downloads,
       track: track,
-      preferredSourceId: _settings.value.preferredSourceId,
-      scriptOrder: _settings.value.scriptOrder,
+      preferredSourceId: _sources.downloadDefault(
+        _settings.value.preferredSourceId,
+        _settings.value.fallbackOrder,
+      ),
+      scriptOrder: _settings.value.downloadOrder,
       quality: _settings.value.quality,
     );
     if (started && mounted) await _openDownloads();

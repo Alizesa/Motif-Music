@@ -1,11 +1,15 @@
 import '../online/domain/playback_source.dart';
+import '../online/lx/lx_ordered_source.dart' show lxOrderedSourceId;
 
 class OnlinePlaybackPreferences {
+  static const _maxBackups = 32;
+
   const OnlinePlaybackPreferences({
     this.quality = OnlineQuality.standard,
     this.preferredSourceId = 'qq',
     this.fallbackSourceId,
     this.scriptOrder = const [],
+    this.fallbackOrder,
   });
 
   final OnlineQuality quality;
@@ -13,33 +17,67 @@ class OnlinePlaybackPreferences {
   final String? fallbackSourceId;
   final List<String> scriptOrder;
 
+  /// Null until the user edits sources in the unified editor. Older versions
+  /// could save a download order without opting into it for playback.
+  final List<String>? fallbackOrder;
+
+  String? get selectedPrimary => preferredSourceId == lxOrderedSourceId
+      ? scriptOrder.firstOrNull
+      : preferredSourceId;
+  List<String> get selectedBackups =>
+      fallbackOrder ??
+      (preferredSourceId == lxOrderedSourceId
+          ? scriptOrder.skip(1).toList()
+          : [?fallbackSourceId]);
+
+  // Download resolution only admits enabled LX scripts from these IDs. Legacy
+  // download-only choices remain intact until a source edit, even after a quality edit.
+  List<String> get downloadOrder => fallbackOrder == null
+      ? scriptOrder
+      : fallbackOrder!.isEmpty
+      ? const []
+      : [
+          for (final id in [preferredSourceId, ...fallbackOrder!])
+            if (id != 'qq') id,
+        ];
+
   Map<String, Object?> toJson() => {
-    'version': 2,
-    'scriptOrder': scriptOrder,
     'quality': quality.name,
     'preferredSourceId': preferredSourceId,
-    'fallbackSourceId': fallbackSourceId,
+    if (fallbackOrder case final order?) ...{
+      'version': 3,
+      'fallbackOrder': order,
+    } else ...{
+      'version': 2,
+      'scriptOrder': scriptOrder,
+      'fallbackSourceId': fallbackSourceId,
+    },
   };
 
+  static bool _validId(Object? id) =>
+      id is String && id.isNotEmpty && id.length <= 200;
   factory OnlinePlaybackPreferences.fromJson(Map<String, Object?> json) {
-    if (json['version'] != 1 && json['version'] != 2) {
+    final version = json['version'];
+    if (!const {1, 2, 3}.contains(version)) {
       throw const FormatException('Invalid preferences');
     }
-    final order = json['version'] == 1 ? const [] : json['scriptOrder'];
+    final unified = version == 3;
+    final order = version == 1
+        ? const []
+        : json[unified ? 'fallbackOrder' : 'scriptOrder'];
     if (order is! List ||
-        order.length > 12 ||
-        order.any((id) => id is! String || id.isEmpty || id.length > 200)) {
-      throw const FormatException('Invalid script order');
+        order.length > (unified ? _maxBackups : 12) ||
+        order.any(
+          (id) => !_validId(id) || (unified && id == lxOrderedSourceId),
+        )) {
+      throw const FormatException('Invalid source order');
     }
     final preferred = json['preferredSourceId'];
-    final fallback = json['fallbackSourceId'];
+    final fallback = unified ? null : json['fallbackSourceId'];
     if (preferred is! String ||
-        preferred.isEmpty ||
-        preferred.length > 200 ||
-        (fallback != null &&
-            (fallback is! String ||
-                fallback.isEmpty ||
-                fallback.length > 200))) {
+        !_validId(preferred) ||
+        (unified && preferred == lxOrderedSourceId) ||
+        (fallback != null && !_validId(fallback))) {
       throw const FormatException('Invalid source preferences');
     }
     final qualities = OnlineQuality.values.where(
@@ -48,7 +86,12 @@ class OnlinePlaybackPreferences {
     if (qualities.length != 1) throw const FormatException('Invalid quality');
     return OnlinePlaybackPreferences(
       quality: qualities.single,
-      scriptOrder: List.unmodifiable(order.cast<String>().toSet()),
+      scriptOrder: unified
+          ? const []
+          : List.unmodifiable(order.cast<String>().toSet()),
+      fallbackOrder: unified
+          ? List.unmodifiable(order.cast<String>().toSet()..remove(preferred))
+          : null,
       preferredSourceId: preferred,
       fallbackSourceId: fallback == preferred ? null : fallback as String?,
     );
@@ -60,7 +103,32 @@ class OnlinePlaybackPreferences {
     String? fallbackSourceId,
     bool clearFallback = false,
     List<String>? scriptOrder,
+    List<String>? fallbackOrder,
   }) {
+    final backups = fallbackOrder ?? this.fallbackOrder;
+    if (backups != null) {
+      final primary = preferredSourceId ?? selectedPrimary;
+      if (primary == null ||
+          !_validId(primary) ||
+          primary == lxOrderedSourceId) {
+        throw ArgumentError('Select a primary source first');
+      }
+      final order = clearFallback
+          ? <String>{}
+          : fallbackSourceId != null
+          ? {fallbackSourceId}
+          : backups.toSet();
+      order.remove(primary);
+      if (order.length > _maxBackups ||
+          order.any((id) => !_validId(id) || id == lxOrderedSourceId)) {
+        throw ArgumentError('Invalid backup source selection');
+      }
+      return OnlinePlaybackPreferences(
+        quality: quality ?? this.quality,
+        preferredSourceId: primary,
+        fallbackOrder: List.unmodifiable(order),
+      );
+    }
     final primary = preferredSourceId ?? this.preferredSourceId;
     final fallback = clearFallback
         ? null

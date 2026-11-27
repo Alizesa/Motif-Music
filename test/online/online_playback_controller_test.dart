@@ -124,6 +124,24 @@ void main() {
     },
   );
 
+  test('selection from the unified backup editor reaches the player without a mode switch', () async {
+    await settings.save(
+      OnlinePlaybackPreferences.fromJson({
+        'version': 3,
+        'quality': 'high',
+        'preferredSourceId': 'qq',
+        'fallbackOrder': ['missing', 'custom'],
+      }),
+    );
+    qq.reply = (_, _) async =>
+        throw const OnlineException(OnlineErrorKind.unavailable);
+    final track = playbackTrack(1);
+    expect(await playback.playQueue([track]), isTrue);
+    expect(qq.calls, [(track, OnlineQuality.high)]);
+    expect(custom.calls, [(track, OnlineQuality.high)]);
+    expect(engine.openCount, 1);
+  });
+
   test('fallback and native opening share a playback ID without exposing track identity', () async {
     diagnostics.setEnabled(true);
     await settings.save(

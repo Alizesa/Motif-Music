@@ -164,6 +164,108 @@ void main() {
     write: write ?? (chunk) async => saved.add(chunk),
   );
 
+  test('backup selection drives playback in its saved order without selecting a mode', () async {
+    Future<OnlineStream> run(List<String> back) => registry.resolve(
+      catalogTrack(duration: duration),
+      OnlineQuality.standard,
+      fallbackOrder: back,
+      cancellation: owner,
+    );
+    expect((await run(order)).sourceId, 'qq');
+    expect(opens, isEmpty);
+    qq.reply = (_, _) async =>
+        throw const OnlineException(OnlineErrorKind.unavailable);
+    media['A'] = Uint8List.sublistView(mp3Fixture(), 0, 74 + 417 * 100);
+    final first =
+        await run([ids['A']!, ids['B']!, ids['B']!]) as ControlledOnlineStream;
+    expect(first.sourceId, ids['B']);
+    expect(opens, ['A', 'B']);
+    expect(bodies.first.readers.single.closed, isTrue);
+    first.input.close();
+    opens.clear();
+    final next = await run([ids['B']!, ids['A']!]) as ControlledOnlineStream;
+    expect(opens, ['B']);
+    next.input.close();
+    expect(registry.downloadDefault('qq', order), lxOrderedSourceId);
+    expect(registry.downloadDefault(ids['A']!, ['qq']), ids['A']);
+  });
+
+  test('temporarily disabling a checked backup does not discard download validation', () async {
+    await manager.configure(ids['B']!, enable: false);
+    expect(registry.downloadDefault(ids['A']!, [ids['B']!]), lxOrderedSourceId);
+    expect(registry.orderedQualities([ids['A']!, ids['B']!]), isNotEmpty);
+  });
+
+  test(
+    'an explicitly placed QQ backup is a boundary between script groups',
+    () async {
+      unavailable.addAll(['tx/A', 'kw/A']);
+      final stream = await registry.resolve(
+        catalogTrack(duration: duration),
+        OnlineQuality.standard,
+        preferredSourceId: ids['A']!,
+        fallbackOrder: ['qq', ids['B']!],
+        cancellation: owner,
+      );
+      expect(stream.sourceId, 'qq');
+      expect(attempts, ['tx/A/128k', 'kw/A/128k']);
+      expect(qq.calls.length, 1);
+      expect(opens, isEmpty);
+    },
+  );
+
+  test(
+    'a missing primary never inserts unselected QQ in a user-edited order',
+    () async {
+      final stream = await registry.resolve(
+        catalogTrack(duration: duration),
+        OnlineQuality.standard,
+        preferredSourceId: 'gone',
+        fallbackOrder: ['also-gone', ids['B']!],
+        cancellation: owner,
+      ) as ControlledOnlineStream;
+      expect(stream.sourceId, ids['B']);
+      stream.input.close();
+      for (final back in [
+        <String>[],
+        ['disabled'],
+      ]) {
+        await expectLater(
+          registry.resolve(
+            catalogTrack(duration: duration),
+            OnlineQuality.standard,
+            preferredSourceId: 'gone',
+            fallbackOrder: back,
+          ),
+          throwsA(isA<OnlineException>()),
+        );
+      }
+      expect(qq.calls, isEmpty);
+      expect(opens, ['B']);
+    },
+  );
+
+  test('QQ throttling or refusal does not invoke checked backups', () async {
+    for (final kind in [
+      OnlineErrorKind.rateLimited,
+      OnlineErrorKind.rejected,
+      OnlineErrorKind.authenticationRequired,
+    ]) {
+      qq.reply = (_, _) async => throw OnlineException(kind);
+      await expectLater(
+        registry.resolve(
+          catalogTrack(duration: duration),
+          OnlineQuality.standard,
+          fallbackOrder: order,
+          cancellation: owner,
+        ),
+        throwsA(isA<OnlineException>().having((e) => e.kind, 'kind', kind)),
+      );
+    }
+    expect(opens, isEmpty);
+    expect(attempts, isEmpty);
+  });
+
   test('short preview is closed before B is played; a validated stream remains readable', () async {
     media['A'] = Uint8List.sublistView(mp3Fixture(), 0, 74 + 417 * 100);
     final stream = await play();

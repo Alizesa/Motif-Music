@@ -59,8 +59,30 @@ class MusicSourceRegistry {
   Set<OnlineQuality> orderedQualities(List<String> ids) => {
     for (final s in _ordered(ids)) ...s.downloadQualities,
   };
-  bool _registered(OrderedLxSource s) =>
-      identical(_managed[s.sourceId]?.resolver, s);
+  bool _registered(PlaybackUrlResolver s) =>
+      identical(_managed[s.sourceId]?.resolver, s) ||
+      _builtIn.any((item) => identical(item.resolver, s));
+
+  /// A download never enrolls QQ or an unchecked script. Keep an explicit
+  /// single-file provider if it is first; otherwise default to the LX list.
+  String downloadDefault(String preferred, List<String>? backups) {
+    if (backups == null || backups.isEmpty) return preferred;
+    final available = {for (final s in downloadSources) s.id: s.resolver};
+    // Disabling a checked script must not silently relax the remaining LX
+    // candidate from validated sequential download to manual single-source mode.
+    final hasScriptBackup = backups.any(
+      (id) => !_builtIn.any((s) => s.id == id),
+    );
+    for (final id in [preferred, ...backups]) {
+      final source = available[id];
+      if (source == null) continue;
+      if (source is! OrderedLxSource || (id == preferred && !hasScriptBackup)) {
+        return id;
+      }
+      return lxOrderedSourceId;
+    }
+    return lxOrderedSourceId; // No eligible checked source; let the user choose.
+  }
 
   Future<String> download(
     String sourceId,
@@ -73,8 +95,8 @@ class MusicSourceRegistry {
     List<String> scriptOrder = const [],
   }) async {
     if (sourceId == lxOrderedSourceId) {
-      return tryOrderedLx(
-        scripts: _ordered(scriptOrder),
+      return trySourceOrder(
+        sources: _ordered(scriptOrder),
         quality: quality,
         owner: cancellation,
         registered: _registered,
@@ -184,6 +206,7 @@ class MusicSourceRegistry {
     OnlineQuality quality, {
     String preferredSourceId = 'qq',
     String? fallbackSourceId,
+    List<String>? fallbackOrder,
     List<String> scriptOrder = const [],
     void Function()? checkActive,
     PcmCancellation? cancellation,
@@ -193,13 +216,35 @@ class MusicSourceRegistry {
     cancellation?.check();
     final ensureSources = loadManaged;
     if (ensureSources != null &&
-        (preferredSourceId != 'qq' || fallbackSourceId != null)) {
+        (preferredSourceId != 'qq' ||
+            fallbackSourceId != null ||
+            (fallbackOrder?.isNotEmpty ?? false))) {
       await ensureSources();
       _checkActive(checkActive);
     }
-    if (preferredSourceId == lxOrderedSourceId) {
-      return tryOrderedLx(
-        scripts: _ordered(scriptOrder),
+    if (fallbackOrder != null && fallbackOrder.isEmpty) {
+      if (!contains(preferredSourceId)) {
+        throw const OnlineException(OnlineErrorKind.unavailable);
+      }
+      return _attempt(
+        preferredSourceId,
+        track,
+        quality,
+        checkActive,
+        cancellation,
+        trace,
+      );
+    }
+    if (fallbackOrder != null || preferredSourceId == lxOrderedSourceId) {
+      final registrations = {for (final s in sources) s.id: s.resolver};
+      final selected = fallbackOrder == null
+          ? _ordered(scriptOrder)
+          : <PlaybackUrlResolver>[
+              for (final id in {preferredSourceId, ...fallbackOrder})
+                ?registrations[id],
+            ];
+      return trySourceOrder(
+        sources: selected,
         quality: quality,
         owner: cancellation ?? PcmCancellation(),
         registered: _registered,
@@ -269,12 +314,12 @@ class MusicSourceRegistry {
     DiagnosticTrace? trace,
     String id,
     OnlineQuality quality,
-    LxPlatform platform,
+    LxPlatform? platform,
   ) {
     if (trace?.active == true) {
       trace!.record(DiagnosticEvent.sourceFallback, {
         ..._sourceFacts(id, quality),
-        DiagnosticField.platform: platform,
+        DiagnosticField.platform: ?platform,
       });
     }
   }

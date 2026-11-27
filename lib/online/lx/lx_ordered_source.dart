@@ -60,18 +60,45 @@ bool _canTryNext(OnlineException error) {
   }.contains(error.kind);
 }
 
-/// Platform first, then the user's snapshotted script order. The timeout covers
-/// selection and validation, not the subsequent transfer of an accepted file.
-Future<T> tryOrderedLx<T>({
-  required List<OrderedLxSource> scripts,
+/// Keep QQ and other explicitly selected providers in position. Within each
+/// uninterrupted run of scripts, exhaust the original platform before matching
+/// another one, just as for a script-only download.
+Iterable<(PlaybackUrlResolver, LxPlatform?)> _candidates(
+  List<PlaybackUrlResolver> sources,
+  OnlineQuality quality,
+) sync* {
+  var i = 0;
+  while (i < sources.length) {
+    final source = sources[i];
+    if (source is! OrderedLxSource) {
+      yield (source, null);
+      i++;
+      continue;
+    }
+    final start = i;
+    while (i < sources.length && sources[i] is OrderedLxSource) {
+      i++;
+    }
+    for (final p in LxPlatform.values) {
+      for (var j = start; j < i; j++) {
+        final script = sources[j] as OrderedLxSource;
+        if (script.supports(p, quality)) yield (script, p);
+      }
+    }
+  }
+}
+
+/// One deadline covers selection and validation, not an accepted file transfer.
+Future<T> trySourceOrder<T>({
+  required List<PlaybackUrlResolver> sources,
   required OnlineQuality quality,
-  required bool Function(OrderedLxSource) registered,
+  required bool Function(PlaybackUrlResolver) registered,
   required PcmCancellation owner,
   void Function()? checkActive,
-  void Function(OrderedLxSource, LxPlatform)? onFallback,
+  void Function(PlaybackUrlResolver, LxPlatform?)? onFallback,
   required Future<T> Function(
-    OrderedLxSource,
-    LxPlatform,
+    PlaybackUrlResolver,
+    LxPlatform?,
     PcmCancellation,
     void Function(),
   )
@@ -96,44 +123,46 @@ Future<T> tryOrderedLx<T>({
   try {
     OnlineException? last;
     LxAudioCheckFailure? audioFailure;
-    final failedScripts = <OrderedLxSource>{};
+    final failedScripts = <PlaybackUrlResolver>{};
     var attempted = false;
-    for (final platform in LxPlatform.values) {
-      for (final script in scripts) {
-        check();
-        if (!registered(script) ||
-            failedScripts.contains(script) ||
-            !script.supports(platform, quality)) {
-          continue;
-        }
+    for (final (source, platform) in _candidates(sources, quality)) {
+      check();
+      if (!registered(source) || failedScripts.contains(source)) continue;
+      try {
+        if (attempted) onFallback?.call(source, platform);
+        attempted = true;
+        final pending = attempt(source, platform, work, accept);
+        final result = source is CancellablePlaybackSource
+            ? await pending
+            : await work.until(
+                pending,
+                discard: (late) {
+                  if (late is ControlledOnlineStream) late.input.close();
+                },
+              );
         try {
-          if (attempted) onFallback?.call(script, platform);
-          attempted = true;
-          final result = await attempt(script, platform, work, accept);
-          try {
-            check();
-            if (!registered(script)) {
-              throw const OnlineException(OnlineErrorKind.closed);
-            }
-            return result;
-          } catch (_) {
-            if (result is ControlledOnlineStream) result.input.close();
-            rethrow;
-          }
-        } on OnlineException catch (e) {
           check();
-          if (accepted || !_canTryNext(e)) rethrow;
-          if (e.kind == OnlineErrorKind.scriptFailed) failedScripts.add(script);
-          if (e is LxAudioCheckFailure) audioFailure ??= e;
-          last = e;
+          if (!registered(source)) {
+            throw const OnlineException(OnlineErrorKind.closed);
+          }
+          return result;
+        } catch (_) {
+          if (result is ControlledOnlineStream) result.input.close();
+          rethrow;
         }
+      } on OnlineException catch (e) {
+        check();
+        if (accepted || !_canTryNext(e)) rethrow;
+        if (e.kind == OnlineErrorKind.scriptFailed) failedScripts.add(source);
+        if (e is LxAudioCheckFailure) audioFailure ??= e;
+        last = e;
       }
     }
     check();
     throw audioFailure ??
         last ??
         OnlineException(
-          scripts.isEmpty
+          sources.isEmpty
               ? OnlineErrorKind.unavailable
               : OnlineErrorKind.unsupportedQuality,
         );
