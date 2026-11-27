@@ -84,6 +84,23 @@ R"LXJS(
     throw new TypeError('Unsupported encoding');
   }
 
+  // LX Mobile copies just its public request options when lx.request is called.
+  // Queue serialized fields, not script-owned objects that may change while
+  // another candidate occupies a slot. Only admitted calls get an exchange ID.
+  function captureRequest(url, {method = 'get', headers, body, form, formData, binary, timeout}) {
+    if (ArrayBuffer.isView(body)) {
+      if (body.length > limit) return null;
+      body = {type: 'Buffer', data: Array.from(body)};
+    }
+    const wire = {__proto__: null, method, headers, body, form, formData, binary: binary === true,
+      _responseBytes: parameters.env === 'desktop', _followRedirects: parameters.env === 'mobile'};
+    if (typeof timeout === 'number' && timeout > 0) wire.timeout = Math.min(timeout, 60000);
+    const options = stringify(wire);
+    if (typeof options !== 'string' || options.length >= limit) return null;
+    const fields = '"url":' + stringify(url) + ',"options":' + options;
+    return fields.length < limit ? fields : null;
+  }
+
   const lx = Object.freeze({
     EVENT_NAMES: events,
     env: parameters.env,
@@ -116,13 +133,13 @@ R"LXJS(
           !options || typeof options !== 'object' || typeof callback !== 'function') {
         throw new TypeError('Invalid request');
       }
-      const entry = { url, options, callback, active: true, allowed: phase === 'play' };
+      const allowed = phase === 'play';
+      const entry = { callback, active: true, allowed, fields: allowed ? captureRequest(url, options) : null };
       queued.push(entry);
       return () => {
         entry.active = false;
         entry.callback = undefined;
-        entry.options = undefined;
-        entry.url = undefined;
+        entry.fields = null;
       };
     },
   });
@@ -236,22 +253,17 @@ R"LXJS(
       if (!entry.allowed) {
         const callback = entry.callback;
         entry.callback = undefined;
-        entry.options = undefined;
-        entry.url = undefined;
+        entry.fields = null;
         callback(new Error('LX request unavailable during initialization'), null, null);
         return 'T';
       }
+      if (entry.fields === null) return 'D{"error":"script"}';
       const id = ++issued;
+      const body = '{"id":' + id + ',' + entry.fields + '}';
+      entry.fields = null;
+      if (body.length >= limit) return 'D{"error":"script"}';
       active.set(id, entry);
-      const options = {...entry.options, _responseBytes: parameters.env === 'desktop',
-        _followRedirects: parameters.env === 'mobile'};
-      if (ArrayBuffer.isView(options.body)) {
-        options.body = {type: 'Buffer', data: Array.from(options.body)};
-      }
-      const body = stringify({ id, url: entry.url, options });
-      entry.url = undefined;
-      entry.options = undefined;
-      return body.length < limit ? 'Q' + body : 'D{"error":"script"}';
+      return 'Q' + body;
     }
     if (active.size) return 'P';
     return timers.size ? 'W' : 'D{"error":"init"}';

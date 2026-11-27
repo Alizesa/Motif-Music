@@ -138,7 +138,7 @@ const startup = initialize + `
   });
   cancelled();
   const config = new Promise((resolve, reject) => {
-    lx.request('https://api.example.test/at-startup', {}, (error, response, body) => {
+    lx.request('https://api.example.test/at-startup', {get body() { throw Error('Read a denied request'); }}, (error, response, body) => {
       if (!(error instanceof Error) || response !== null || body !== null) {
         resolve('unexpected startup callback');
       } else {
@@ -189,13 +189,14 @@ for (const env of ['desktop', 'mobile']) {
   assert.deepEqual(await run(env, multi, offline, {source: 'kg'}), {error: 'unsupported'});
   assert.deepEqual(await run(env, multi, offline, {source: 'kw'}), {error: 'rateLimited'});
 }
+const response = body => ({response: {statusCode: 200, headers: {}, body}});
+
 // Release the slow first HTTP request only when the third one is issued.
 // This requires overlapping 1/2 and delivering 2 without waiting for 1.
 for (const env of ['desktop', 'mobile']) {
   const order = [];
   let finishFirst;
   const hold = new Promise(resolve => { finishFirst = resolve; });
-  const response = n => ({response: {statusCode: 200, headers: {}, body: n}});
   const parallel = await run(env, initialize + `
     lx.on('request', async () => {
       const completed = [];
@@ -230,4 +231,87 @@ for (const env of ['desktop', 'mobile']) {
   assert.equal(won.url,'https://media.example.test/win.mp3');
   assert.deepEqual(calls,['start:1','start:2','cancel:1']);
 }
+// LX captures request arguments when the script calls it, not when a host slot
+// opens. One script may reuse the same options for a batch of candidates.
+for (const env of ['mobile', 'desktop']) {
+  const seen = [];
+  const snap = await run(env, initialize + `
+    lx.on('request', async ({source, info}) => {
+      const headers = {'X-Fixture': 'first'};
+      const body = {source, rid: info.musicInfo.songmid, level: info.type};
+      const opts = {method: 'POST', headers, body, timeout: 1000,
+        localNote: 'only used by the script', _followRedirects: false, _responseBytes: false};
+      const issue = () => new Promise((resolve, reject) =>
+        lx.request('https://api.example.test/lookup', opts,
+          (err, resp, value) => err || value !== resp.body ? reject() : resolve(value)));
+      const first = issue();
+      headers['X-Fixture'] = 'second';
+      body.level = '320k';
+      const second = issue();
+      opts.method = 'HEAD';
+      headers['X-Fixture'] = 'unused';
+      body.rid = 'unused';
+      const results = await Promise.all([first, second]);
+      return results[1].data.url;
+    });`, (request, id) => {
+    const o = request.options;
+    seen.push([o.method, o.headers['X-Fixture'], o.body.rid, o.body.level]);
+    assert.equal(Object.hasOwn(o, 'localNote'), false);
+    assert.equal(o._responseBytes, env === 'desktop');
+    assert.equal(o._followRedirects, env === 'mobile');
+    return response(id === 1 ? {code:'unavailable'} : {data:{url:'https://media.example.test/result.mp3'}});
+  });
+  assert.deepEqual(seen, [['POST','first','fixture','128k'], ['POST','second','fixture','320k']]);
+  assert.equal(snap.url, 'https://media.example.test/result.mp3');
+
+  // Typed bytes, form and formData are also detached; unused metadata isn't
+  // part of the bounded host message, even for a library with large options.
+  const payloads = [];
+  const detached = await run(env, initialize + `
+    lx.on('request', async () => {
+      const payloads = [{body:new Uint8Array([0,255])}, {form:{value:'old'}}, {formData:{value:'old'}}];
+      const calls = payloads.map(p => new Promise((resolve, reject) => {
+        lx.request('https://api.example.test/upload', {method:'POST', localNote:'x'.repeat(66000), ...p},
+          (err, resp, body) => err ? reject() : resolve(body));
+      }));
+      payloads[0].body[0] = 7; payloads[1].form.value = 'new'; payloads[2].formData.value = 'new';
+      return (await Promise.all(calls))[2];
+    });`, ({options:o}) => {
+    assert.equal(Object.hasOwn(o, 'localNote'), false);
+    payloads.push(o.body ?? o.form ?? o.formData);
+    return response('https://media.example.test/form.mp3');
+  });
+  assert.deepEqual(payloads, [{type:'Buffer',data:[0,255]}, {value:'old'}, {value:'old'}]);
+  assert.equal(detached.url, 'https://media.example.test/form.mp3');
+
+  const tooLarge = await run(env, initialize + `
+    lx.on('request', () => new Promise(resolve => lx.request('https://api.example.test/oversized',
+      {method:'POST', body:'x'.repeat(66000)}, () => resolve('unexpected'))));`,
+    () => assert.fail('Oversized public request reached the broker'));
+  assert.deepEqual(tooLarge, {error:'script'});
+
+  // A 200 callback is not itself a successful musicUrl. The same script may
+  // try another candidate without changing song, channel, or requested quality.
+  for (const winner of [0, 3, 4]) {
+    let issued = 0;
+    const result = await run(env, initialize + `
+      lx.on('request', async ({source, info}) => {
+        for (let n = 1; n <= 4; n++) {
+          const opts = n <= 2 ? {} : {method:'POST', body:{source, rid:info.musicInfo.songmid, level:info.type}};
+          const url = await new Promise(resolve => lx.request('https://api.example.test/' + n, opts,
+            (err, resp, body) => resolve(!err && resp.statusCode === 200 && resp.body === body && body?.data?.url)));
+          if (url) return url;
+        }
+        throw Error('No address');
+      });`, ({options}, id) => {
+      issued++;
+      if (id <= 2) return {error:'denied'};
+      assert.deepEqual(options.body, {source:'tx', rid:'fixture', level:'128k'});
+      return response(id === winner ? {data:{url:'https://media.example.test/winner.mp3'}} : {code:'unavailable'});
+    });
+    assert.equal(issued, winner || 4);
+    assert.deepEqual(result, winner ? {url:'https://media.example.test/winner.mp3'} : {error:'unavailable'});
+  }
+}
+
 console.log('PASS LX mobile/desktop request, cancellation and offline-startup fallback contracts');
