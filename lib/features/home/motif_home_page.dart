@@ -106,7 +106,7 @@ class _MotifHomePageState extends State<MotifHomePage>
         _engine is ControlledPcmAudioEngine) {
       final manager = _lxSources = LxSourceManager(
         registry: _sources,
-        downloadDetail: widget.qqMusic.publicDetail,
+        publicDetail: widget.qqMusic.publicDetail,
         store: LxSourceStore(() async {
           final directory = await getApplicationSupportDirectory();
           return Directory(

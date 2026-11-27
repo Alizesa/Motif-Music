@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../online/domain/music_source_registry.dart';
 import '../../online/lx/lx_native_worker.dart';
+import '../../online/lx/lx_music_platform.dart';
 import '../../online/lx/lx_source_manager.dart';
 import '../../online/lx/lx_source_store.dart';
 import '../../settings/online_playback_settings_controller.dart';
@@ -106,7 +107,9 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
       ),
       const Padding(
         padding: EdgeInsets.symmetric(vertical: 8),
-        child: Text('导入后自动启用，可选择为优先或备用来源。'),
+        child: Text(
+          '导入后自动启用。自动换源先用 QQ，再按需用歌名和歌手到脚本支持的酷我、酷狗目录匹配同曲。不会改变队列或降低所选音质。',
+        ),
       ),
       if (manager.busy || !manager.ready && manager.error == null)
         const LinearProgressIndicator(),
@@ -122,10 +125,8 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
                     if (source.info['version'] case final version?
                         when version.isNotEmpty)
                       version,
-                    if (source.qualities.isNotEmpty)
-                      source.qualities
-                          .map((quality) => quality.label)
-                          .join(' / '),
+                    for (final entry in source.capabilities.byPlatform.entries)
+                      '${entry.key.label}：${entry.value.map((q) => q.label).join(' / ')}',
                   ].join(' · '),
                 ),
                 value: source.enabled,
@@ -135,6 +136,42 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
                         manager.configure(source.id, enable: enable),
                       ),
               ),
+              if (source.capabilities.byPlatform.length > 1 ||
+                  source.platform != null)
+                ListTile(
+                  title: const Text('取址通道'),
+                  subtitle: const Text('固定后不再尝试此脚本的其他平台。更改会停止此音源的当前任务。'),
+                  trailing: DropdownButton<String>(
+                    key: ValueKey('platform-${source.id}'),
+                    value: source.platform?.name ?? 'auto',
+                    items: [
+                      const DropdownMenuItem(
+                        value: 'auto',
+                        child: Text('自动换源'),
+                      ),
+                      for (final p in LxPlatform.values)
+                        if (source.capabilities.byPlatform.containsKey(p) ||
+                            source.platform == p)
+                          DropdownMenuItem(
+                            value: p.name,
+                            child: Text('仅用${p.label}'),
+                          ),
+                    ],
+                    onChanged: !canEdit
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            unawaited(
+                              manager.selectPlatform(
+                                source.id,
+                                value == 'auto'
+                                    ? null
+                                    : LxPlatform.values.byName(value),
+                              ),
+                            );
+                          },
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Wrap(

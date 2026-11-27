@@ -108,6 +108,7 @@ class MusicSourceRegistry {
     DiagnosticTrace? trace,
   }) async {
     _checkActive(checkActive);
+    cancellation?.check();
     final ensureSources = loadManaged;
     if (ensureSources != null &&
         (preferredSourceId != 'qq' || fallbackSourceId != null)) {
@@ -132,6 +133,7 @@ class MusicSourceRegistry {
       );
     } on OnlineException catch (error) {
       _checkActive(checkActive);
+      cancellation?.check();
       // Account rejection and cooldowns must not become a fallback loop.
       if (fallback == null ||
           !{
@@ -140,6 +142,7 @@ class MusicSourceRegistry {
             OnlineErrorKind.unsupportedFormat,
             OnlineErrorKind.unsupportedQuality,
             OnlineErrorKind.unsupportedRequest,
+            OnlineErrorKind.scriptFailed,
             OnlineErrorKind.transport,
           }.contains(error.kind)) {
         rethrow;
@@ -211,6 +214,7 @@ class MusicSourceRegistry {
     DiagnosticTrace? trace,
   ) async {
     _checkActive(checkActive);
+    cancellation?.check();
     final managed = _managed[id];
     final source =
         managed ?? _builtIn.where((source) => source.id == id).firstOrNull;
@@ -226,6 +230,7 @@ class MusicSourceRegistry {
         : await resolver.resolve(track, quality);
     try {
       _checkActive(checkActive);
+      cancellation?.check();
       final controlled = stream is ControlledOnlineStream;
       if (managed != null && !identical(_managed[id], managed)) {
         throw const OnlineException(OnlineErrorKind.closed);

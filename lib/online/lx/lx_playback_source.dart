@@ -2,6 +2,7 @@ import '../domain/online_error.dart';
 import '../domain/playback_source.dart';
 import '../network/request_coordinator.dart';
 import '../qq/qq_track.dart';
+import 'lx_music_platform.dart';
 
 /// Boundary for an isolated LX JavaScript host. This slice does not load or
 /// execute scripts, or expose app credentials, filesystem or a network bridge.
@@ -19,25 +20,9 @@ class LxQqCapabilities {
 
   /// Input is the payload of lx.send(lx.EVENT_NAMES.inited, payload).
   factory LxQqCapabilities.fromInit(Object? payload) {
-    if (payload is! Map || payload['sources'] is! Map) {
-      throw const OnlineException(OnlineErrorKind.malformedResponse);
-    }
-    final source = (payload['sources'] as Map)['tx'];
-    if (source is! Map ||
-        source['type'] != 'music' ||
-        source['actions'] is! List ||
-        !(source['actions'] as List).contains('musicUrl') ||
-        source['qualitys'] is! List) {
-      throw const OnlineException(OnlineErrorKind.unsupported);
-    }
-    final declared = source['qualitys'] as List;
-    final qualities = OnlineQuality.values
-        .where((quality) => declared.contains(quality.lxValue))
-        .toSet();
-    if (qualities.isEmpty) {
-      throw const OnlineException(OnlineErrorKind.unsupported);
-    }
-    return LxQqCapabilities._(Set.unmodifiable(qualities));
+    final tx = LxMusicCapabilities.fromInit(payload).byPlatform[LxPlatform.tx];
+    if (tx == null) throw const OnlineException(OnlineErrorKind.unsupported);
+    return LxQqCapabilities._(tx);
   }
 }
 
@@ -128,15 +113,13 @@ Map<String, Object?> lxQqMusicInfo(QqTrack track) {
   final types = [
     for (final quality in OnlineQuality.values)
       if (track.qualitySizes.containsKey(quality))
-        {'type': quality.lxValue, 'size': _size(track.qualitySizes[quality]!)},
+        {'type': quality.lxValue, 'size': lxSize(track.qualitySizes[quality]!)},
   ];
   final mappedTypes = {
     for (final item in types) item['type']!: {'size': item['size']},
   };
   final seconds = track.durationMs == null ? null : track.durationMs! ~/ 1000;
-  final interval = seconds == null
-      ? null
-      : '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
+  final interval = seconds == null ? null : lxInterval(seconds);
   return {
     'source': 'tx',
     'songmid': track.mid,
@@ -150,10 +133,7 @@ Map<String, Object?> lxQqMusicInfo(QqTrack track) {
     'interval': interval,
     'types': types,
     '_types': mappedTypes,
+    'img': '',
     'typeUrl': <String, Object?>{},
   };
 }
-
-String _size(int bytes) => bytes >= 1024 * 1024
-    ? '${(bytes / (1024 * 1024)).toStringAsFixed(2)}M'
-    : '${(bytes / 1024).toStringAsFixed(2)}K';

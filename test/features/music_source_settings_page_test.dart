@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -34,6 +35,11 @@ void main() {
             }) async => {
               'capabilities': {
                 'sources': {
+                  'kg': {
+                    'type': 'music',
+                    'actions': ['musicUrl'],
+                    'qualitys': ['flac'],
+                  },
                   'tx': {
                     'type': 'music',
                     'actions': ['musicUrl'],
@@ -68,6 +74,34 @@ void main() {
         expect(find.byType(AlertDialog), findsNothing);
         expect(find.byType(TextField), findsNothing);
         expect(find.text('域名授权'), findsNothing);
+        final channel = find.byKey(ValueKey('platform-$id'));
+        await tester.scrollUntilVisible(
+          channel,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        final select = tester.widget<DropdownButton<String>>(channel);
+        expect(select.items!.map((item) => item.value), ['auto', 'tx', 'kg']);
+        // The menu callback commits a real file: invoke it on the real async
+        // clock, not from a route animation waiting for the next fake frame.
+        await tester.runAsync(() async {
+          final saved = Completer<void>();
+          void onChanged() {
+            if (!managed.busy && !saved.isCompleted) saved.complete();
+          }
+
+          managed.addListener(onChanged);
+          try {
+            select.onChanged!('kg');
+            await saved.future.timeout(const Duration(seconds: 4));
+          } finally {
+            managed.removeListener(onChanged);
+          }
+        });
+        await tester.pumpAndSettle();
+        expect(tester.widget<DropdownButton<String>>(channel).value, 'kg');
+        expect(managed.sources.single.platform?.name, 'kg');
+        expect(store.value.preferredSourceId, id);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
         managed.dispose();

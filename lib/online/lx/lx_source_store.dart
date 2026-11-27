@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 
 import '../domain/playback_source.dart';
 import 'lx_native_worker.dart';
+import 'lx_music_platform.dart';
 
 const lxSourceCountLimit = 12;
 final _digestPattern = RegExp(r'^[0-9a-f]{64}$');
@@ -66,12 +67,14 @@ final class LxStoredSource {
     required this.info,
     required this.version,
     required this.enabled,
-    Iterable<OnlineQuality> qualities = const [],
-  }) : qualities = Set.unmodifiable(qualities);
+    required this.capabilities,
+    this.needsProbe = false,
+    this.platform,
+  });
 
   factory LxStoredSource.newScript(
     LxScriptDocument document,
-    Iterable<OnlineQuality> qualities, [
+    LxMusicCapabilities capabilities, [
     LxStoredSource? previous,
   ]) {
     final random = Random.secure();
@@ -84,7 +87,8 @@ final class LxStoredSource {
       info: document.info,
       version: (previous?.version ?? 0) + 1,
       enabled: true,
-      qualities: qualities,
+      capabilities: capabilities,
+      platform: previous?.platform,
     );
   }
 
@@ -93,7 +97,17 @@ final class LxStoredSource {
   final Map<String, String> info;
   final int version;
   final bool enabled;
-  final Set<OnlineQuality> qualities;
+  final LxMusicCapabilities capabilities;
+  final bool needsProbe;
+
+  /// Null means automatic. An explicit pin must never widen to other channels.
+  final LxPlatform? platform;
+  Set<OnlineQuality> get qualities => platform == null
+      ? capabilities.qualities
+      : capabilities.byPlatform[platform] ?? const {};
+  bool supports(LxPlatform channel, OnlineQuality quality) =>
+      (platform == null || channel == platform) &&
+      capabilities.supports(channel, quality);
 
   String get name {
     final label = info['name']!
@@ -104,14 +118,19 @@ final class LxStoredSource {
 
   LxStoredSource configure({
     required bool enabled,
-    required Iterable<OnlineQuality> qualities,
+    required LxMusicCapabilities capabilities,
+    required LxPlatform? platform,
+    bool needsProbe = false,
+    bool bumpVersion = true,
   }) => LxStoredSource(
     id: id,
     digest: digest,
     info: info,
-    version: version + 1,
+    version: bumpVersion ? version + 1 : version,
+    platform: platform,
+    needsProbe: needsProbe,
     enabled: enabled,
-    qualities: qualities,
+    capabilities: capabilities,
   );
 
   Map<String, Object?> toJson() => {
@@ -119,7 +138,11 @@ final class LxStoredSource {
     'digest': digest,
     'version': version,
     'enabled': enabled,
-    'qualities': qualities.map((quality) => quality.lxValue).toList(),
+    if (platform != null) 'platform': platform!.name,
+    if (needsProbe)
+      'qualities': qualities.map((quality) => quality.lxValue).toList()
+    else
+      'platforms': capabilities.toJson(),
   };
 }
 
@@ -139,7 +162,7 @@ final class LxSourceStore {
     final value = jsonDecode(
       utf8.decode(await _boundedRead(manifest, 64 * 1024)),
     );
-    if (value is! Map || !const {1, 2}.contains(value['schema'])) {
+    if (value is! Map || !const {1, 2, 3}.contains(value['schema'])) {
       throw const FormatException('LX catalog');
     }
     final entries = value['sources'];
@@ -164,18 +187,27 @@ final class LxSourceStore {
         final script = await _readDocument(root, digest);
         // Legacy domain lists are intentionally ignored. Network destinations
         // are checked by the host on demand; no user-maintained list is needed.
-        final declared = entry['qualities'] as List;
-        final qualities = OnlineQuality.values
-            .where((q) => declared.contains(q.lxValue))
-            .toSet();
+        final platforms = entry['platforms'];
+        final legacy = value['schema'] != 3 || platforms == null;
+        final capabilities = LxMusicCapabilities.fromStorage(
+          legacy ? {'tx': entry['qualities'] as List} : platforms as Map,
+        );
+        final rawPin = entry['platform'];
+        final pin = LxPlatform.values
+            .where((p) => p.name == rawPin)
+            .firstOrNull;
+        if (rawPin != null && pin == null) continue;
         sources.add(
           LxStoredSource(
             id: entry['id'] as String,
             digest: digest,
             info: script.info,
             version: entry['version'] as int,
-            enabled: entry['enabled'] == true && qualities.isNotEmpty,
-            qualities: qualities,
+            enabled:
+                entry['enabled'] == true && capabilities.qualities.isNotEmpty,
+            platform: pin,
+            needsProbe: legacy,
+            capabilities: capabilities,
           ),
         );
       } catch (_) {
@@ -214,7 +246,7 @@ final class LxSourceStore {
       _member(root, 'sources.json'),
       utf8.encode(
         jsonEncode({
-          'schema': 2,
+          'schema': 3,
           'sources': sources.map((source) => source.toJson()).toList(),
         }),
       ),

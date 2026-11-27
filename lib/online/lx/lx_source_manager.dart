@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -19,30 +18,16 @@ import 'lx_audio_media.dart';
 import 'lx_download.dart';
 import 'lx_network.dart';
 import 'lx_request_error.dart';
-import 'lx_playback_source.dart';
+import 'lx_address_resolver.dart';
 import 'lx_source_store.dart';
+import 'lx_music_platform.dart';
+import 'lx_platform_catalog.dart';
 
-typedef LxRun = Future<Map<String, Object?>> Function(
-  Uint8List script, {
-  required Map<String, String> info,
-  Map<String, Object?>? event,
-  required LxRequestHandler onRequest,
-  required PcmCancellation cancellation,
-});
-typedef LxFetch = Future<Map<String, Object?>> Function(
-  LxApiRequest,
-  PcmCancellation,
-);
 typedef LxOpen = Future<ControlledAudioInput> Function(
   Uri,
   PcmCancellation,
   PcmCancellation,
 );
-
-typedef LxDownloadDetail = Future<QqTrack> Function(
-  String mid, {
-  required int songType,
-});
 
 typedef LxDownload = Future<String> Function(
   Uri,
@@ -59,8 +44,10 @@ final class LxSourceManager extends ChangeNotifier {
     LxFetch? fetch,
     this._open,
     this._download,
-    this._downloadDetail,
-  }) : _run = run ?? const LxNativeWorker().run,
+    this._publicDetail,
+    LxPlatformCatalog? catalog,
+  }) : _catalog = catalog ?? LxPlatformCatalog(),
+       _run = run ?? const LxNativeWorker().run,
        _fetch = fetch ?? const LxHttpsTransport().api;
 
   final LxSourceStore store;
@@ -69,7 +56,8 @@ final class LxSourceManager extends ChangeNotifier {
   final LxFetch _fetch;
   final LxOpen? _open;
   final LxDownload? _download;
-  final LxDownloadDetail? _downloadDetail;
+  final LxPublicDetail? _publicDetail;
+  final LxPlatformCatalog _catalog;
   final _closing = PcmCancellation();
   Future<void>? _initializing;
   List<LxStoredSource> _sources = const [];
@@ -88,7 +76,7 @@ final class LxSourceManager extends ChangeNotifier {
 
   Future<void> _load() async {
     try {
-      final loaded = await store.load();
+      final loaded = await _upgradeCatalog(await store.load());
       if (_closing.cancelled) return;
       _apply(loaded);
       _ready = true;
@@ -101,50 +89,122 @@ final class LxSourceManager extends ChangeNotifier {
     }
   }
 
-  Future<bool> import(Uint8List bytes, {String? replaceId}) =>
-      _change(() async {
-        final document = LxScriptDocument.parse(bytes);
-        final previous = replaceId == null ? null : _byId(replaceId);
-        if (_sources.any((item) => item.digest == document.digest)) {
-          throw const _SourceChangeError('已导入相同内容的脚本。');
-        }
-        if (previous == null && _sources.length >= lxSourceCountLimit) {
-          throw const _SourceChangeError('音源数量已达上限。');
-        }
-        // Import is the user's action to use this version. Validate without
-        // networking before changing any existing source or playback lease.
-        final capabilities = await _capabilities(document);
-        _closing.check();
-        final source = LxStoredSource.newScript(
-          document,
-          capabilities.qualities,
-          previous,
-        );
-        await store.import(document);
+  /// Old manifests only remembered tx. Re-probe verified, enabled blobs
+  /// offline without changing IDs or preferences. Bound startup work; entries
+  /// not upgraded retain their old capabilities and can be retried later.
+  Future<List<LxStoredSource>> _upgradeCatalog(
+    List<LxStoredSource> loaded,
+  ) async {
+    if (!loaded.any((s) => s.enabled && s.needsProbe)) return loaded;
+    final scope = PcmCancellation();
+    final detach = _closing.listen(scope.cancel);
+    final timer = Timer(const Duration(seconds: 5), scope.cancel);
+    final next = loaded.toList();
+    var changed = false;
+    try {
+      for (var i = 0; i < next.length && !scope.cancelled; i++) {
+        final source = next[i];
+        if (!source.enabled || !source.needsProbe) continue;
         try {
-          await _save([
-            for (final item in _sources)
-              if (item.id == replaceId) source else item,
-            if (previous == null) source,
-          ], revoke: previous);
-        } catch (_) {
-          await _discard(document.digest);
-          rethrow;
+          final script = await store.read(source);
+          scope.check();
+          final caps = await _capabilities(script, scope);
+          next[i] = source.configure(
+            enabled: true,
+            capabilities: caps,
+            platform: source.platform,
+            bumpVersion: false,
+          );
+          changed = true;
+        } on Exception {
+          // A failed upgrade must not revoke a previously usable tx channel.
         }
-        if (previous != null) await _discard(previous.digest);
-      });
+      }
+      _closing.check();
+      if (changed) {
+        try {
+          await store.save(next);
+        } on FileSystemException {
+          // Use the verified capabilities this session; retry saving next launch.
+        }
+      }
+      return next;
+    } finally {
+      timer.cancel();
+      detach();
+      scope.cancel();
+    }
+  }
+
+  Future<bool> import(Uint8List bytes, {String? replaceId}) => _change(
+    () async {
+      final document = LxScriptDocument.parse(bytes);
+      final previous = replaceId == null ? null : _byId(replaceId);
+      if (_sources.any((item) => item.digest == document.digest)) {
+        throw const _SourceChangeError('已导入相同内容的脚本。');
+      }
+      if (previous == null && _sources.length >= lxSourceCountLimit) {
+        throw const _SourceChangeError('音源数量已达上限。');
+      }
+      // Import is the user's action to use this version. Validate without
+      // networking before changing any existing source or playback lease.
+      final capabilities = await _capabilities(document);
+      _closing.check();
+      final pin = previous?.platform;
+      if (pin != null && !capabilities.byPlatform.containsKey(pin)) {
+        throw const _SourceChangeError('新脚本不支持当前固定通道。请先选“自动换源”，或作为新音源导入。');
+      }
+      final source = LxStoredSource.newScript(document, capabilities, previous);
+      await store.import(document);
+      try {
+        await _save([
+          for (final item in _sources)
+            if (item.id == replaceId) source else item,
+          if (previous == null) source,
+        ], revoke: previous);
+      } catch (_) {
+        await _discard(document.digest);
+        rethrow;
+      }
+      if (previous != null) await _discard(previous.digest);
+    },
+  );
 
   Future<bool> configure(String id, {required bool enable}) =>
       _change(() async {
         final current = _byId(id);
-        var qualities = current.qualities;
-        if (enable && !current.enabled) {
-          final document = await store.read(current);
-          final capabilities = await _capabilities(document);
-          qualities = capabilities.qualities;
-        }
-        final next = current.configure(enabled: enable, qualities: qualities);
+        final capabilities = enable && (!current.enabled || current.needsProbe)
+            ? await _capabilities(await store.read(current))
+            : current.capabilities;
+        final next = current.configure(
+          enabled: enable,
+          capabilities: capabilities,
+          platform: current.platform,
+          needsProbe: current.needsProbe && !enable,
+        );
         await _save(_replace(next), revoke: current);
+      });
+
+  Future<bool> selectPlatform(String id, LxPlatform? platform) =>
+      _change(() async {
+        final current = _byId(id);
+        if (current.platform == platform) return;
+        if (platform != null &&
+            !current.capabilities.byPlatform.containsKey(platform)) {
+          throw const _SourceChangeError('该脚本未声明此平台通道。');
+        }
+        // Stop the old lease before publishing a different routing policy.
+        await _save(
+          _replace(
+            current.configure(
+              enabled: current.enabled,
+              capabilities: current.capabilities,
+              needsProbe: current.needsProbe,
+              platform: platform,
+            ),
+          ),
+          revoke: current,
+        );
       });
 
   Future<bool> remove(String id) => _change(() async {
@@ -171,21 +231,24 @@ final class LxSourceManager extends ChangeNotifier {
       if (item.id == source.id) source else item,
   ];
 
-  Future<LxQqCapabilities> _capabilities(LxScriptDocument document) async {
+  Future<LxMusicCapabilities> _capabilities(
+    LxScriptDocument document, [
+    PcmCancellation? scope,
+  ]) async {
     final result = await _run(
       document.bytes,
       info: document.info,
       onRequest: (_, _) async => const {'error': 'denied'},
-      cancellation: _closing,
+      cancellation: scope ?? _closing,
     );
-    _closing.check();
+    (scope ?? _closing).check();
     if (!result.containsKey('capabilities')) {
       throw const _SourceChangeError('脚本初始化失败。');
     }
     try {
-      return LxQqCapabilities.fromInit(result['capabilities']);
+      return LxMusicCapabilities.fromInit(result['capabilities']);
     } on OnlineException {
-      throw const _SourceChangeError('脚本未声明可用的 QQ 点播能力。');
+      throw const _SourceChangeError('脚本未声明可用的 QQ、酷我或酷狗 musicUrl 通道及音质。');
     }
   }
 
@@ -246,13 +309,16 @@ final class LxSourceManager extends ChangeNotifier {
     MusicSourceRegistration(
       name: source.name,
       resolver: _ManagedLxSource(
-        source,
-        store,
-        _run,
-        _fetch,
+        LxAddressResolver(
+          source: source,
+          store: store,
+          run: _run,
+          fetch: _fetch,
+          publicDetail: _publicDetail,
+          catalog: _catalog,
+        ),
         _open,
         _download,
-        _downloadDetail,
       ),
     ),
   );
@@ -298,23 +364,11 @@ final class _SourceChangeError implements Exception {
 
 final class _ManagedLxSource
     implements CancellablePlaybackSource, TrackDownloadSource {
-  _ManagedLxSource(
-    this.source,
-    this.store,
-    this.run,
-    this.fetch,
-    this.open,
-    this.download,
-    this.downloadDetail,
-  );
-
-  final LxStoredSource source;
-  final LxSourceStore store;
-  final LxRun run;
-  final LxFetch fetch;
+  _ManagedLxSource(this.address, this.open, this.download);
+  final LxAddressResolver address;
+  LxStoredSource get source => address.source;
   final LxOpen? open;
   final LxDownload? download;
-  final LxDownloadDetail? downloadDetail;
   final _lifetime = PcmCancellation();
   static int _nextIdentity = 0;
 
@@ -323,124 +377,6 @@ final class _ManagedLxSource
 
   @override
   Set<OnlineQuality> get downloadQualities => source.qualities;
-
-  Future<Uri> _address(
-    QqTrack track,
-    OnlineQuality quality,
-    PcmCancellation work,
-    DiagnosticTrace? trace,
-  ) async {
-    if (!source.qualities.contains(quality)) {
-      throw const OnlineException(OnlineErrorKind.unsupportedQuality);
-    }
-    work.check();
-    final script = await store.read(source);
-    work.check();
-    final broker = _LxRequestBudget(fetch, trace);
-    trace?.record(DiagnosticEvent.lxScript, {
-      DiagnosticField.state: DiagnosticResult.started,
-    });
-    final result = await run(
-      script.bytes,
-      info: script.info,
-      event: {
-        'source': 'tx',
-        'action': 'musicUrl',
-        'info': {'type': quality.lxValue, 'musicInfo': lxQqMusicInfo(track)},
-      },
-      onRequest: broker.request,
-      cancellation: work,
-    );
-    work.check();
-    if (broker.terminal != null) throw broker.terminal!;
-    final uri = checkedLxUrl(result['url']);
-    trace?.record(DiagnosticEvent.lxScript, {
-      DiagnosticField.state: uri == null
-          ? DiagnosticResult.failed
-          : DiagnosticResult.succeeded,
-    });
-    if (uri != null) return uri;
-    if (result.containsKey('url')) {
-      throw const LxRequestException(LxRequestFailure.mediaAddress);
-    }
-    if (!broker.admitted && broker.denied != null) throw broker.denied!;
-    if (broker.transmissionFailed || result['error'] == 'timeout') {
-      throw broker.lastTransportFailure ??
-          const LxRequestException(LxRequestFailure.scriptTimeout);
-    }
-    throw OnlineException(switch (result['error']) {
-      'unsupported' => OnlineErrorKind.unsupported,
-      'unavailable' => OnlineErrorKind.unavailable,
-      _ => OnlineErrorKind.operationRejected,
-    });
-  }
-
-  Future<QqTrack> _prepareDownloadTrack(
-    QqTrack track,
-    OnlineQuality quality,
-    PcmCancellation work,
-    DiagnosticTrace? trace,
-  ) async {
-    final detail = downloadDetail;
-    if (detail == null ||
-        (track.mediaMid != null &&
-            track.durationMs != null &&
-            track.qualitySizes.containsKey(quality))) {
-      trace?.record(DiagnosticEvent.lxCatalog, {
-        DiagnosticField.state: DiagnosticResult.skipped,
-      });
-      return track;
-    }
-    work.check();
-    trace?.record(DiagnosticEvent.lxCatalog, {
-      DiagnosticField.state: DiagnosticResult.started,
-    });
-    try {
-      // The public client owns caching, coalescing and rate limits. Do not let
-      // a queued catalog lookup indefinitely delay or block script resolution.
-      final extra = await work.until(
-        detail(
-          track.mid,
-          songType: track.songType,
-        ).timeout(const Duration(seconds: 5)),
-      );
-      work.check();
-      if (extra.mid != track.mid ||
-          (track.songId != null &&
-              extra.songId != null &&
-              extra.songId != track.songId)) {
-        trace?.record(DiagnosticEvent.lxCatalog, {
-          DiagnosticField.state: DiagnosticResult.mismatched,
-        });
-        return track;
-      }
-      trace?.record(DiagnosticEvent.lxCatalog, {
-        DiagnosticField.state: DiagnosticResult.succeeded,
-      });
-      return QqTrack(
-        mid: track.mid,
-        title: track.title,
-        artists: track.artists,
-        album: track.album,
-        songType: track.songType,
-        songId: track.songId ?? extra.songId,
-        albumMid: track.albumMid ?? extra.albumMid,
-        mediaMid: track.mediaMid ?? extra.mediaMid,
-        durationMs: track.durationMs ?? extra.durationMs,
-        qualitySizes: {...extra.qualitySizes, ...track.qualitySizes},
-      );
-    } on Exception catch (error) {
-      if (error is! OnlineException && error is! TimeoutException) rethrow;
-      if (trace?.active == true) {
-        trace!.record(DiagnosticEvent.lxCatalog, {
-          DiagnosticField.state: DiagnosticResult.failed,
-          ...diagnosticFailure(error),
-        });
-      }
-      // Some scripts can resolve the original sparse catalog row directly.
-      return track;
-    }
-  }
 
   @override
   Future<String> transfer(
@@ -458,11 +394,10 @@ final class _ManagedLxSource
     final release = _lifetime.listen(work.cancel);
     final detach = cancellation.listen(work.cancel);
     try {
-      final prepared = await _prepareDownloadTrack(track, quality, work, trace);
       final Uri uri;
       try {
         // The worker observes cancellation and reaps its process before returning.
-        uri = await _address(prepared, quality, work, trace);
+        uri = await address.resolve(track, quality, work, trace);
       } on OnlineException catch (error) {
         if (trace?.active == true) {
           trace!.record(
@@ -472,7 +407,8 @@ final class _ManagedLxSource
         }
         if (error is LxRequestException ||
             (error.kind != OnlineErrorKind.unavailable &&
-                error.kind != OnlineErrorKind.operationRejected)) {
+                error.kind != OnlineErrorKind.operationRejected &&
+                error.kind != OnlineErrorKind.scriptFailed)) {
           rethrow;
         }
         throw _DownloadAddressException(error.kind);
@@ -534,7 +470,7 @@ final class _ManagedLxSource
     var handedOff = false;
     try {
       work.check();
-      final uri = await _address(track, quality, work, trace);
+      final uri = await address.resolve(track, quality, work, trace);
       final override = open;
       final input = await work.until(
         override == null
@@ -602,118 +538,6 @@ final class _DownloadAddressException extends OnlineException {
   String toString() => kind == OnlineErrorKind.unavailable
       ? '所选音源未提供这首歌在该档位的下载地址。可换音源或音质。'
       : '获取下载地址失败：所选音源未能完成取址，请稍后重试。';
-}
-
-final class _LxRequestBudget {
-  _LxRequestBudget(this.fetch, this.trace);
-  final LxFetch fetch;
-  final DiagnosticTrace? trace;
-  int _requests = 0;
-  int _candidates = 0;
-  bool get admitted => _requests > 0;
-  bool transmissionFailed = false;
-  OnlineException? lastTransportFailure;
-  OnlineException? denied;
-  OnlineException? terminal;
-
-  Future<Map<String, Object?>> request(
-    Map<String, Object?> message,
-    PcmCancellation cancellation,
-  ) async {
-    const refused = {'error': 'denied'};
-    cancellation.check();
-    final candidate = ++_candidates;
-    if (_requests >= 4 || terminal != null) {
-      trace?.record(DiagnosticEvent.lxApiFailure, {
-        DiagnosticField.candidate: candidate,
-        DiagnosticField.reason: _requests >= 4
-            ? LxRequestFailure.budget
-            : terminal?.kind,
-      });
-      return refused;
-    }
-    final uri = checkedLxUrl(message['url']);
-    if (uri == null) {
-      denied ??= const LxRequestException(LxRequestFailure.apiAddress);
-      trace?.record(DiagnosticEvent.lxApiFailure, {
-        DiagnosticField.candidate: candidate,
-        DiagnosticField.reason: LxRequestFailure.apiAddress,
-      });
-      return refused;
-    }
-    final watch = trace?.active == true ? (Stopwatch()..start()) : null;
-    var redirects = 0;
-    try {
-      final request = LxApiRequest.parse(
-        message,
-        onRedirect: () {
-          if (_requests >= 4) {
-            throw const LxRequestException(LxRequestFailure.budget);
-          }
-          _requests++;
-          redirects++;
-        },
-      );
-      _requests++;
-      final response = await fetch(request, cancellation);
-      final result = {'response': response};
-      if (watch != null) {
-        final status = response['statusCode'];
-        trace?.record(DiagnosticEvent.lxApiResponse, {
-          DiagnosticField.candidate: candidate,
-          DiagnosticField.elapsedMs: watch.elapsedMilliseconds,
-          DiagnosticField.redirects: redirects,
-          if (status is int && status >= 100 && status <= 599)
-            DiagnosticField.status: status,
-        });
-      }
-      // A later valid response supersedes an earlier candidate's network
-      // failure; parsing that response is the script's next decision.
-      transmissionFailed = false;
-      lastTransportFailure = null;
-      if (utf8.encode(jsonEncode(result)).length > lxMessageLimit) {
-        terminal = const OnlineException(OnlineErrorKind.malformedResponse);
-        return refused;
-      }
-      return result;
-    } on PcmCancelled {
-      rethrow;
-    } on OnlineException catch (error) {
-      _recordFailure(candidate, error, watch);
-      if (error is LxRequestException &&
-          const {
-            LxRequestFailure.headers,
-            LxRequestFailure.method,
-            LxRequestFailure.body,
-          }.contains(error.reason)) {
-        denied = error;
-      } else if (error.kind == OnlineErrorKind.transport) {
-        transmissionFailed = true;
-        lastTransportFailure = error;
-      } else {
-        terminal = error;
-      }
-      return refused;
-    } on IOException catch (error) {
-      _recordFailure(candidate, error, watch);
-      transmissionFailed = true;
-      lastTransportFailure = const LxRequestException(LxRequestFailure.connect);
-      return refused;
-    } on FormatException catch (error) {
-      _recordFailure(candidate, error, watch);
-      terminal = const OnlineException(OnlineErrorKind.malformedResponse);
-      return refused;
-    }
-  }
-
-  void _recordFailure(int candidate, Object error, Stopwatch? watch) {
-    if (trace?.active != true) return;
-    trace!.record(DiagnosticEvent.lxApiFailure, {
-      DiagnosticField.candidate: candidate,
-      DiagnosticField.elapsedMs: watch?.elapsedMilliseconds,
-      ...diagnosticFailure(error),
-    });
-  }
 }
 
 /// Unregister the source lease when a consumer finishes or discards the input.

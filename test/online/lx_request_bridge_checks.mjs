@@ -6,11 +6,11 @@ import { setImmediate as drainJobs, setTimeout as delay } from 'node:timers/prom
 const prelude = fs.readFileSync('tool/lx_prototype/script_prelude.inc', 'utf8')
   .replace(/^R"LXJS\(/, '').replace(/\)LXJS"\s*$/, '');
 
-async function run(env, script, exchange, { initOnly = false } = {}) {
+async function run(env, script, exchange, { initOnly = false, source = 'tx', type = '128k' } = {}) {
   const context = vm.createContext({});
   const make = vm.runInContext(prelude, context, {timeout: 2000});
   const parameters = {env, info: {name: 'contract fixture'}, event: initOnly ? null : {
-    source: 'tx', action: 'musicUrl', info: {type: '128k', musicInfo: {songmid: 'fixture'}},
+    source, action: 'musicUrl', info: {type, musicInfo: {source, songmid: 'fixture'}},
   }};
   const step = make(parameters, script);
   vm.runInContext(script, context, {timeout: 2000});
@@ -146,5 +146,27 @@ for (const env of ['desktop', 'mobile']) {
   });
   assert.deepEqual(play, {url: 'https://media.example.test/from-config.mp3'});
   assert.deepEqual(requests, ['https://api.example.test/foreground-config']);
+}
+const multi = `
+  lx.send(lx.EVENT_NAMES.inited, {sources: {
+    kw: {type: 'music', actions: ['musicUrl'], qualitys: ['128k']},
+    kg: {type: 'music', actions: ['musicUrl'], qualitys: ['flac', 'made-up']},
+    wy: {type: 'music', actions: ['lyric'], qualitys: ['flac']},
+  }});
+  lx.on(lx.EVENT_NAMES.request, function({source, info}) {
+    if (this !== lx || info.musicInfo.source !== source) throw Error('wrong dispatch');
+    if (source === 'kw') throw new Error('服务器繁忙');
+    return Promise.resolve('https://media.example.test/' + source + '.flac');
+  });
+`;
+for (const env of ['desktop', 'mobile']) {
+  const offline = () => assert.fail('unexpected exchange');
+  const init = await run(env, multi, offline, {initOnly: true});
+  assert.deepEqual(Object.keys(init.capabilities.sources), ['kw', 'kg']);
+  assert.deepEqual(init.capabilities.sources.kg.qualitys, ['flac']);
+  assert.deepEqual(await run(env, multi, offline, {source: 'kg', type: 'flac'}),
+    {url: 'https://media.example.test/kg.flac'});
+  assert.deepEqual(await run(env, multi, offline, {source: 'kg'}), {error: 'unsupported'});
+  assert.deepEqual(await run(env, multi, offline, {source: 'kw'}), {error: 'rateLimited'});
 }
 console.log('PASS LX mobile/desktop request, cancellation and offline-startup fallback contracts');

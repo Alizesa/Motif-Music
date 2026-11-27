@@ -112,7 +112,7 @@ void main() {
     manager = LxSourceManager(
       store: store,
       registry: registry,
-      downloadDetail: (mid, {required songType}) {
+      publicDetail: (mid, {required songType}) {
         catalogRequests.add((mid, songType));
         return catalogReply();
       },
@@ -418,7 +418,7 @@ void main() {
               .having(
                 (error) => error.kind,
                 'kind',
-                OnlineErrorKind.operationRejected,
+                OnlineErrorKind.scriptFailed,
               )
               .having(
                 (error) => error.toString(),
@@ -765,7 +765,9 @@ void main() {
       'candidate3.example.test',
     ]);
     expect(opened.single.host, 'new-cdn.example.test');
-    expect(catalogRequests, isEmpty, reason: 'playback path is unchanged');
+    expect(catalogRequests, [
+      ('song', 0),
+    ], reason: 'sparse playback uses public detail once');
     stream.input.close();
   });
 
@@ -852,6 +854,8 @@ void main() {
     () async {
       final id = await enable();
       final old = manager.sources.single.toJson()
+        ..remove('platforms')
+        ..['qualities'] = ['128k', '320k']
         ..['api'] = ['no longer a domain list']
         ..['media'] = [];
       await File('${root.path}/sources.json').writeAsString(
@@ -868,7 +872,7 @@ void main() {
       final saved = jsonDecode(
         await File('${root.path}/sources.json').readAsString(),
       ) as Map;
-      expect(saved['schema'], 2);
+      expect(saved['schema'], 3);
       expect((saved['sources'] as List).single, isNot(contains('api')));
       expect((saved['sources'] as List).single, isNot(contains('media')));
     },

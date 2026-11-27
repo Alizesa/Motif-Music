@@ -334,7 +334,11 @@ final class LxHttpsTransport {
               encodings.single.toLowerCase() != 'identity')) {
         throw const OnlineException(OnlineErrorKind.malformedResponse);
       }
-      final bytes = await _readApiBody(reply, method);
+      final bytes = await readLxResponseBody(
+        reply,
+        method,
+        maximum: _apiBodyLimit,
+      );
       final raw = request.binary || request.responseBytes;
       if (raw && bytes.length > (request.binary ? 32 * 1024 : 16 * 1024)) {
         throw const OnlineException(OnlineErrorKind.malformedResponse);
@@ -381,7 +385,11 @@ final class LxHttpsTransport {
   }
 }
 
-Future<Uint8List> _readApiBody(LxWireResponse reply, String method) async {
+Future<Uint8List> readLxResponseBody(
+  LxWireResponse reply,
+  String method, {
+  required int maximum,
+}) async {
   if (method == 'HEAD' || reply.status == 204 || reply.status == 304) {
     return Uint8List(0);
   }
@@ -392,7 +400,7 @@ Future<Uint8List> _readApiBody(LxWireResponse reply, String method) async {
   final buffer = BytesBuilder(copy: false);
 
   Future<void> readCount(int size) async {
-    if (size < 0 || size + buffer.length > _apiBodyLimit) throw invalid;
+    if (size < 0 || size + buffer.length > maximum) throw invalid;
     while (size != 0) {
       final part = await body.read(size.clamp(1, 8192));
       if (part.isEmpty) throw invalid;
@@ -424,7 +432,7 @@ Future<Uint8List> _readApiBody(LxWireResponse reply, String method) async {
     while (true) {
       final part = await body.read(8192);
       if (part.isEmpty) break;
-      if (buffer.length + part.length > _apiBodyLimit) throw invalid;
+      if (buffer.length + part.length > maximum) throw invalid;
       buffer.add(part);
     }
   }

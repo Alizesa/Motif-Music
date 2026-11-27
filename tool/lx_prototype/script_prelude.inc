@@ -98,12 +98,15 @@ R"LXJS(
     },
     send(event, data) {
       if (event !== events.inited || capabilities) return Promise.reject(new Error('Unsupported LX event'));
-      const tx = data?.sources?.tx;
-      const supported = tx?.type === 'music' && Array.isArray(tx.actions) &&
-        tx.actions.includes('musicUrl') && Array.isArray(tx.qualitys)
-        ? allowedQualities.filter(quality => tx.qualitys.includes(quality)) : [];
-      capabilities = { sources: supported.length
-        ? { tx: { type: 'music', actions: ['musicUrl'], qualitys: supported } } : {} };
+      const sources = {};
+      for (const platform of ['tx', 'kw', 'kg', 'wy', 'mg']) {
+        const item = data?.sources?.[platform];
+        if (item?.type !== 'music' || !Array.isArray(item.actions) ||
+            !item.actions.includes('musicUrl') || !Array.isArray(item.qualitys)) continue;
+        const qualitys = allowedQualities.filter(quality => item.qualitys.includes(quality));
+        if (qualitys.length) sources[platform] = { type: 'music', actions: ['musicUrl'], qualitys };
+      }
+      capabilities = { sources };
       return Promise.resolve();
     },
     request(url, options, callback) {
@@ -161,19 +164,29 @@ R"LXJS(
     if (phase === 'init' && capabilities) {
       if (typeof handler !== 'function') return 'D{"error":"init"}';
       if (!parameters.event) return 'D' + stringify({ capabilities });
-      if (!capabilities.sources.tx?.qualitys.includes(parameters.event.info.type)) {
+      const { source, action, info } = parameters.event;
+      if (action !== 'musicUrl' || !Object.hasOwn(capabilities.sources, source) ||
+          !capabilities.sources[source].qualitys.includes(info.type)) {
         return 'D{"error":"unsupported"}';
       }
       // Settle queued startup requests through the denial callback below.
       // They remain ineligible for network access after switching to play.
       timers.clear();
       phase = 'play';
-      const promise = handler.call(lx, parameters.event);
-      if (!promise || typeof promise.then !== 'function') return 'D{"error":"script"}';
-      promise.then(url => {
-        result = typeof url === 'string' && url.length <= 2048
-          ? { url } : { error: 'script' };
-      }, () => { result = { error: 'unavailable' }; });
+      // Only fixed categories cross the process boundary, never the script's text.
+      const failed = error => {
+        const message = typeof error === 'string' ? error : error?.message;
+        result = { error: message === '\u670d\u52a1\u5668\u7e41\u5fd9' ? 'rateLimited' :
+          message === '\u53d6\u6d88http\u8bf7\u6c42' ? 'cancelled' : 'unavailable' };
+      };
+      try {
+        const promise = handler.call(lx, parameters.event);
+        if (!promise || typeof promise.then !== 'function') return 'D{"error":"script"}';
+        promise.then(url => {
+          result = typeof url === 'string' && url.length > 0 && url.length <= 2048
+            ? { url } : { error: 'unavailable' };
+        }, failed);
+      } catch (error) { failed(error); }
       return 'T';
     }
     for (const [id, timer] of timers) {
