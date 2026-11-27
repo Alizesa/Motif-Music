@@ -137,9 +137,9 @@ std::string SimulateScriptHost(void* opaque, std::string_view message) {
   if (exchange.started && !exchange.cancelled && message == "P") {
     return R"({"pending":true})";
   }
-  if (exchange.started && !exchange.cancelled && message == "X") {
+  if (exchange.started && !exchange.cancelled && message == "X1") {
     exchange.cancelled = true;
-    return R"({"error":"cancelled"})";
+    return R"({"pending":true})";
   }
   exchange.invalid = true;
   return {};

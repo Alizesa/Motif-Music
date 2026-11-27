@@ -17,7 +17,8 @@ R"LXJS(
   let capabilities;
   let phase = 'init';
   let result;
-  let pending;
+  const active = new Map();
+  let issued = 0;
   let requests = 0;
 
   function bufferFrom(value, encoding = 'utf8') {
@@ -151,14 +152,45 @@ R"LXJS(
   Object.defineProperty(globalThis, 'eval', { value: denyCode, writable: false, configurable: false });
   Object.defineProperty(globalThis, 'Function', { value: denyCode, writable: false, configurable: false });
 
-  return response => {
-    if (pending && response !== undefined) {
-      const answer = parse(response);
-      if (!answer.pending) pending.answer = answer;
+  function deliver(callback, answer) {
+    if (answer.response) {
+      const wire = answer.response;
+      const resp = {statusCode: wire.statusCode, statusMessage: wire.statusMessage,
+        headers: wire.headers, body: wire.body};
+      if (typeof wire._rawBase64 === 'string') {
+        const raw = bufferFrom(wire._rawBase64, 'base64');
+        if (wire._binary) resp.body = parameters.env === 'mobile'
+          ? {type: 'Buffer', data: Array.from(raw)} : raw;
+        if (parameters.env === 'desktop') {
+          resp.raw = raw;
+          resp.bytes = raw.length;
+        }
+      }
+      callback(null, resp, resp.body);
+    } else {
+      callback(new Error('LX request failed'), null, null);
     }
-    if (pending && !pending.active) {
-      pending = undefined;
-      return 'X';
+  }
+
+  return response => {
+    if (response !== undefined) {
+      const answer = parse(response);
+      if (answer.pending !== true) {
+        const entry = active.get(answer.id);
+        if (!entry) return 'D{"error":"script"}';
+        active.delete(answer.id);
+        const callback = entry.callback;
+        entry.callback = undefined;
+        if (entry.active && !result) deliver(callback, answer);
+        // Drain Promise jobs before admitting more work (e.g. a race winner).
+        return 'T';
+      }
+    }
+    for (const [id, entry] of active) {
+      if (entry.active && !result) continue;
+      active.delete(id);
+      entry.callback = undefined;
+      return 'X' + id;
     }
     if (result) return 'D' + stringify(result);
     if (phase === 'init' && capabilities) {
@@ -195,33 +227,10 @@ R"LXJS(
       timer.callback(...timer.args);
       return 'T';
     }
-    if (pending) {
-      if (!pending.answer) return 'P';
-      const { callback, answer } = pending;
-      pending.callback = undefined;
-      pending.options = undefined;
-      pending.url = undefined;
-      pending = undefined;
-      if (answer.response) {
-        const wire = answer.response;
-        const resp = {statusCode: wire.statusCode, statusMessage: wire.statusMessage,
-          headers: wire.headers, body: wire.body};
-        if (typeof wire._rawBase64 === 'string') {
-          const raw = bufferFrom(wire._rawBase64, 'base64');
-          if (wire._binary) resp.body = parameters.env === 'mobile'
-            ? {type: 'Buffer', data: Array.from(raw)} : raw;
-          if (parameters.env === 'desktop') {
-            resp.raw = raw;
-            resp.bytes = raw.length;
-          }
-        }
-        callback(null, resp, resp.body);
-      } else {
-        callback(new Error('LX request failed'), null, null);
-      }
-      return 'T';
-    }
-    while (queued.length) {
+    // Independent requests can overlap, but never invent a candidate for
+    // a script that is still awaiting the preceding one. The host enforces
+    // both the two-slot ceiling and the shared outbound budget independently.
+    while (active.size < 2 && queued.length) {
       const entry = queued.shift();
       if (!entry.active) continue;
       if (!entry.allowed) {
@@ -232,15 +241,19 @@ R"LXJS(
         callback(new Error('LX request unavailable during initialization'), null, null);
         return 'T';
       }
-      pending = entry;
+      const id = ++issued;
+      active.set(id, entry);
       const options = {...entry.options, _responseBytes: parameters.env === 'desktop',
         _followRedirects: parameters.env === 'mobile'};
       if (ArrayBuffer.isView(options.body)) {
         options.body = {type: 'Buffer', data: Array.from(options.body)};
       }
-      const body = stringify({ url: entry.url, options });
+      const body = stringify({ id, url: entry.url, options });
+      entry.url = undefined;
+      entry.options = undefined;
       return body.length < limit ? 'Q' + body : 'D{"error":"script"}';
     }
+    if (active.size) return 'P';
     return timers.size ? 'W' : 'D{"error":"init"}';
   };
 }

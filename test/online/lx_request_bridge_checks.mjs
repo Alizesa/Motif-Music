@@ -15,19 +15,39 @@ async function run(env, script, exchange, { initOnly = false, source = 'tx', typ
   const step = make(parameters, script);
   vm.runInContext(script, context, {timeout: 2000});
   let answer;
-  for (let actions = 0; actions < 100; actions++) {
-    // The native loop drains all nested Promise jobs before stepping.
+  const active = new Set();
+  const ready = [];
+  for (let actions = 0; actions < 150; actions++) {
     await drainJobs();
     const message = step(answer);
     answer = undefined;
-    if (message.startsWith('D')) return JSON.parse(message.slice(1));
+    if (message.startsWith('D')) {
+      assert.equal(active.size, 0);
+      return JSON.parse(message.slice(1));
+    }
     if (message.startsWith('Q')) {
-      answer = JSON.stringify(await exchange(JSON.parse(message.slice(1))));
-    } else if (message === 'X') {
-      answer = JSON.stringify(await exchange('cancel'));
+      const {id, ...request} = JSON.parse(message.slice(1));
+      assert.ok(Number.isInteger(id) && !active.has(id) && active.size < 2);
+      active.add(id);
+      Promise.resolve(exchange(request, id)).then(reply => {
+        if (active.has(id) && !reply.pending) ready.push({id, ...reply});
+      });
+      answer = '{"pending":true}';
+    } else if (message.startsWith('X')) {
+      const id = Number(message.slice(1));
+      assert.ok(active.delete(id));
+      const index = ready.findIndex(r => r.id === id);
+      if (index >= 0) ready.splice(index, 1);
+      await exchange('cancel', id);
+      answer = '{"pending":true}';
     } else if (message === 'P' || message === 'W') {
       await delay(2);
-      if (message === 'P') answer = '{"pending":true}';
+      if (message === 'P') {
+        assert.ok(active.size);
+        const reply = ready.shift();
+        if (reply) active.delete(reply.id);
+        answer = JSON.stringify(reply ?? {pending:true});
+      }
     } else assert.equal(message, 'T');
   }
   throw new Error('LX contract did not complete');
@@ -168,5 +188,46 @@ for (const env of ['desktop', 'mobile']) {
     {url: 'https://media.example.test/kg.flac'});
   assert.deepEqual(await run(env, multi, offline, {source: 'kg'}), {error: 'unsupported'});
   assert.deepEqual(await run(env, multi, offline, {source: 'kw'}), {error: 'rateLimited'});
+}
+// Release the slow first HTTP request only when the third one is issued.
+// This requires overlapping 1/2 and delivering 2 without waiting for 1.
+for (const env of ['desktop', 'mobile']) {
+  const order = [];
+  let finishFirst;
+  const hold = new Promise(resolve => { finishFirst = resolve; });
+  const response = n => ({response: {statusCode: 200, headers: {}, body: n}});
+  const parallel = await run(env, initialize + `
+    lx.on('request', async () => {
+      const completed = [];
+      const q = n => new Promise((resolve,reject) => {
+        lx.request('https://api.example.test/' + n, {}, (err,resp,body) => {
+          if (err || n !== body || body !== resp.body) return reject();
+          completed.push(n); resolve();
+        });
+      });
+      await Promise.all([q(1), q(2), q(3)]);
+      if (completed.join(',') !== '2,1,3') throw Error('wrong callback routing');
+      return 'https://media.example.test/parallel.mp3';
+    });`, (req,id) => {
+    assert.notEqual(req, 'cancel'); order.push(id);
+    if (id === 1) return hold;
+    if (id === 3) finishFirst(response(1));
+    return response(id);
+  });
+  assert.deepEqual(order,[1,2,3]);
+  assert.equal(parallel.url,'https://media.example.test/parallel.mp3');
+
+  const calls = [];
+  const won = await run(env, initialize + `
+    lx.on('request', async () => {
+      const wait = n => new Promise((resolve,reject) => lx.request(
+        'https://api.example.test/' + n, {}, (err,resp,body) => err ? reject(err) : resolve(body)));
+      return await Promise.race([wait(1), wait(2), wait(3)]);
+    });`, (req,id) => {
+    calls.push((req === 'cancel' ? 'cancel:' : 'start:') + id);
+    return id === 2 ? response('https://media.example.test/win.mp3') : {pending:true};
+  });
+  assert.equal(won.url,'https://media.example.test/win.mp3');
+  assert.deepEqual(calls,['start:1','start:2','cancel:1']);
 }
 console.log('PASS LX mobile/desktop request, cancellation and offline-startup fallback contracts');

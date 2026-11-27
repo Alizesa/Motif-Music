@@ -189,6 +189,8 @@ final class LxAddressResolver {
         ...diagnosticFailure(failure),
       });
       throw failure;
+    } finally {
+      broker.close();
     }
     work.check();
     final uri = checkedLxUrl(result['url']);
@@ -214,9 +216,9 @@ final class LxAddressResolver {
     }
     if (quota.full) throw const LxRequestException(LxRequestFailure.budget);
     if (!broker.admitted && broker.denied != null) throw broker.denied!;
-    if (broker.transmissionFailed || result['error'] == 'timeout') {
-      throw broker.lastTransportFailure ??
-          const LxRequestException(LxRequestFailure.scriptTimeout);
+    if (broker.lastTransportFailure case final failure?) throw failure;
+    if (result['error'] == 'timeout') {
+      throw const LxRequestException(LxRequestFailure.scriptTimeout);
     }
     throw OnlineException(switch (result['error']) {
       'unsupported' => OnlineErrorKind.unsupported,
@@ -339,10 +341,34 @@ final class _LxRequestBudget {
   final DiagnosticTrace? trace;
   bool admitted = false;
   int _candidates = 0;
-  bool transmissionFailed = false;
+  final _active = <PcmCancellation>{};
+  bool _closed = false;
+  int _lastObservedCandidate = 0;
   OnlineException? lastTransportFailure;
   OnlineException? denied;
   OnlineException? terminal;
+
+  void _observe(int candidate, OnlineException? failure) {
+    // Report the newest admitted candidate's outcome even if an older HTTP
+    // request finished later. The delivery order to the script is unaffected.
+    if (candidate < _lastObservedCandidate) return;
+    _lastObservedCandidate = candidate;
+    lastTransportFailure = failure;
+  }
+
+  void _stop(OnlineException cause, PcmCancellation origin) {
+    terminal ??= cause;
+    for (final peer in _active.toList()) {
+      if (!identical(peer, origin)) peer.cancel();
+    }
+  }
+
+  void close() {
+    _closed = true;
+    for (final scope in _active.toList()) {
+      scope.cancel();
+    }
+  }
 
   Future<Map<String, Object?>> request(
     Map<String, Object?> message,
@@ -350,13 +376,12 @@ final class _LxRequestBudget {
   ) async {
     const refused = {'error': 'denied'};
     cancellation.check();
+    if (_closed) throw const PcmCancelled();
     final candidate = ++_candidates;
     if (quota.full || terminal != null) {
       trace?.record(DiagnosticEvent.lxApiFailure, {
         DiagnosticField.candidate: candidate,
-        DiagnosticField.reason: quota.full
-            ? LxRequestFailure.budget
-            : terminal?.kind,
+        DiagnosticField.reason: terminal?.kind ?? LxRequestFailure.budget,
       });
       return refused;
     }
@@ -371,24 +396,36 @@ final class _LxRequestBudget {
     }
     final watch = trace?.active == true ? (Stopwatch()..start()) : null;
     var redirects = 0;
+    final io = PcmCancellation();
+    final detach = cancellation.listen(io.cancel);
+    _active.add(io);
     try {
       final request = LxApiRequest.parse(
         message,
         onRedirect: () {
+          io.check();
           quota.take();
           redirects++;
         },
       );
       quota.take();
       admitted = true;
-      final response = await fetch(request, cancellation);
+      if (trace?.active == true) {
+        trace!.record(DiagnosticEvent.lxApiStart, {
+          DiagnosticField.candidate: candidate,
+          DiagnosticField.inFlight: _active.length,
+          DiagnosticField.timeoutMs: request.timeout.inMilliseconds,
+        });
+      }
+      final response = await fetch(request, io);
+      io.check();
       // Deliver upstream HTTP status to the callback, but do not let an
       // access refusal/rate limit cause more requests or platform rotation.
       switch (response['statusCode']) {
         case 401 || 403 || 407:
-          terminal = const OnlineException(OnlineErrorKind.rejected);
+          _stop(const OnlineException(OnlineErrorKind.rejected), io);
         case 429:
-          terminal = const OnlineException(OnlineErrorKind.rateLimited);
+          _stop(const OnlineException(OnlineErrorKind.rateLimited), io);
       }
       final result = {'response': response};
       if (watch != null) {
@@ -401,18 +438,19 @@ final class _LxRequestBudget {
             DiagnosticField.status: status,
         });
       }
-      // A later valid response supersedes an earlier candidate's network
-      // failure; parsing that response is the script's next decision.
-      transmissionFailed = false;
-      lastTransportFailure = null;
-      if (utf8.encode(jsonEncode(result)).length > lxMessageLimit) {
-        terminal = const OnlineException(OnlineErrorKind.malformedResponse);
+      _observe(candidate, null);
+      // Reserve room for the exchange's one-use numeric ID in the same frame.
+      if (utf8.encode(jsonEncode({...result, 'id': lxScriptCallLimit})).length >
+          lxMessageLimit) {
+        _stop(const OnlineException(OnlineErrorKind.malformedResponse), io);
         return refused;
       }
       return result;
-    } on PcmCancelled {
+    } on PcmCancelled catch (error) {
+      _recordFailure(candidate, error, watch);
       rethrow;
     } on OnlineException catch (error) {
+      io.check();
       _recordFailure(candidate, error, watch);
       if (error is LxRequestException &&
           const {
@@ -422,21 +460,25 @@ final class _LxRequestBudget {
           }.contains(error.reason)) {
         denied = error;
       } else if (error.kind == OnlineErrorKind.transport) {
-        transmissionFailed = true;
-        lastTransportFailure = error;
+        _observe(candidate, error);
       } else {
-        terminal = error;
+        _stop(error, io);
       }
       return refused;
     } on IOException catch (error) {
+      io.check();
       _recordFailure(candidate, error, watch);
-      transmissionFailed = true;
-      lastTransportFailure = const LxRequestException(LxRequestFailure.connect);
+      _observe(candidate, const LxRequestException(LxRequestFailure.connect));
       return refused;
     } on FormatException catch (error) {
+      io.check();
       _recordFailure(candidate, error, watch);
-      terminal = const OnlineException(OnlineErrorKind.malformedResponse);
+      _stop(const OnlineException(OnlineErrorKind.malformedResponse), io);
       return refused;
+    } finally {
+      _active.remove(io);
+      detach();
+      io.cancel();
     }
   }
 

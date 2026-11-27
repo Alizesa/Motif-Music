@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -8,18 +7,17 @@ import 'package:flutter/services.dart';
 import '../../audio/controlled_pcm.dart';
 import '../domain/online_error.dart';
 import 'lx_request_error.dart';
+import 'lx_script_exchange.dart';
 import 'fixture/lx_fixture_runtime.dart';
 
+export 'lx_script_exchange.dart'
+    show lxMessageLimit, lxScriptExchangeLimit, lxScriptCallLimit;
+
 const lxScriptLimit = 768 * 1024;
-const lxMessageLimit = 64 * 1024;
 const lxWorkerTimeout = Duration(seconds: 34);
-const lxScriptExchangeLimit = 2400;
 const _channel = MethodChannel('motif/lx_fixture');
 
-typedef LxRequestHandler = Future<Map<String, Object?>> Function(
-  Map<String, Object?> request,
-  PcmCancellation cancellation,
-);
+typedef LxRequestHandler = LxExchangeHandler;
 
 /// A single native run finishes only after its isolated process is reaped.
 final class LxNativeWorker {
@@ -38,7 +36,7 @@ final class LxNativeWorker {
     if (!available || script.isEmpty || script.length > lxScriptLimit) {
       throw const OnlineException(OnlineErrorKind.unsupported);
     }
-    final parameters = _encode({
+    final parameters = encodeLxMessage({
       'env': Platform.isAndroid ? 'mobile' : 'desktop',
       'info': info,
       'event': event,
@@ -46,14 +44,14 @@ final class LxNativeWorker {
     final scope = PcmCancellation();
     final remove = cancellation.listen(scope.cancel);
     final deadline = Timer(lxWorkerTimeout, scope.cancel);
-    final exchange = _ScriptExchange(scope, onRequest);
+    final exchange = LxScriptExchange(scope, onRequest);
 
     try {
       final result = Platform.isAndroid
           ? await _android(script, parameters, exchange.reply, scope)
           : await _windows(script, parameters, exchange.reply, scope);
       scope.check();
-      return _decode(result);
+      return decodeLxMessage(result);
     } catch (_) {
       cancellation.check();
       if (scope.cancelled) {
@@ -61,10 +59,10 @@ final class LxNativeWorker {
       }
       throw const OnlineException(OnlineErrorKind.operationRejected);
     } finally {
-      exchange.cancel();
       deadline.cancel();
       remove();
       scope.cancel();
+      await exchange.close();
     }
   });
 
@@ -168,86 +166,6 @@ final class LxNativeWorker {
       await stderr;
     }
   }
-}
-
-final class _ScriptExchange {
-  _ScriptExchange(this.scope, this.handler);
-  final PcmCancellation scope;
-  final LxRequestHandler handler;
-  _PendingExchange? _pending;
-  int _messages = 0;
-  int _requests = 0;
-  static final _waiting = _encode({'pending': true});
-  static final _denied = _encode({'error': 'denied'});
-
-  Future<Uint8List> reply(Uint8List message) async {
-    scope.check();
-    if (message.isEmpty ||
-        message.length > lxMessageLimit ||
-        ++_messages > lxScriptExchangeLimit) {
-      throw const FormatException('LX broker message');
-    }
-    if (message.first == 81 && _pending == null && ++_requests <= 12) {
-      final request = _decode(Uint8List.sublistView(message, 1));
-      final pending = _pending = _PendingExchange();
-      pending.unlink = scope.listen(pending.scope.cancel);
-      unawaited(
-        Future.sync(() => handler(request, pending.scope)).then<void>(
-          (value) {
-            try {
-              pending.result = _encode(value);
-            } on FormatException {
-              pending.result = _denied;
-            }
-          },
-          onError: (Object _) {
-            pending.result = _denied;
-          },
-        ),
-      );
-      return _waiting;
-    }
-    if (message.length != 1) throw const FormatException('LX broker frame');
-    if (message.first == 88) {
-      cancel();
-      return _denied;
-    }
-    if (message.first == 80 && _pending != null) {
-      final result = _pending!.result;
-      if (result == null) return _waiting;
-      cancel();
-      return result;
-    }
-    throw const FormatException('LX broker command');
-  }
-
-  void cancel() {
-    final pending = _pending;
-    _pending = null;
-    pending?.unlink();
-    pending?.scope.cancel();
-  }
-}
-
-final class _PendingExchange {
-  final scope = PcmCancellation();
-  late final void Function() unlink;
-  Uint8List? result;
-}
-
-Uint8List _encode(Map<String, Object?> object) {
-  final bytes = utf8.encode(jsonEncode(object));
-  if (bytes.length > lxMessageLimit) throw const FormatException('LX size');
-  return bytes;
-}
-
-Map<String, Object?> _decode(Uint8List bytes) {
-  if (bytes.isEmpty || bytes.length > lxMessageLimit) {
-    throw const FormatException('LX size');
-  }
-  final value = jsonDecode(utf8.decode(bytes));
-  if (value is! Map<String, Object?>) throw const FormatException('LX object');
-  return value;
 }
 
 final class _FrameReader {

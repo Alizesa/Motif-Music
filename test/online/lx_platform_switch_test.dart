@@ -9,6 +9,7 @@ import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/online/domain/music_source_registry.dart';
 import 'package:motif/online/domain/online_error.dart';
 import 'package:motif/online/domain/playback_source.dart';
+import 'package:motif/online/lx/lx_address_resolver.dart' show LxFetch;
 import 'package:motif/online/lx/lx_music_platform.dart';
 import 'package:motif/online/lx/lx_native_worker.dart';
 import 'package:motif/online/lx/lx_platform_catalog.dart';
@@ -40,6 +41,7 @@ void main() {
   late List<Map> music;
   late int fetches, downloads, opens, probes, apiStatus;
   late bool brokenInit;
+  LxFetch? apiReply;
   late Future<Map<String, Object?>> Function(
     String,
     LxRequestHandler,
@@ -91,8 +93,9 @@ void main() {
             music.add(snapshot);
             return reply(platform, onRequest, cancellation);
           },
-      fetch: (_, _) async {
+      fetch: (req, scope) async {
         fetches++;
+        if (apiReply case final respond?) return respond(req, scope);
         return {'statusCode': apiStatus, 'body': null};
       },
       open: (uri, _, _) async {
@@ -122,6 +125,7 @@ void main() {
     music = [];
     fetches = downloads = opens = probes = 0;
     apiStatus = 200;
+    apiReply = null;
     brokenInit = false;
     reply = (p, _, _) async =>
         p == 'tx' ? {'error': 'unavailable'} : {'url': _url};
@@ -309,6 +313,151 @@ void main() {
     expect(attempts, ['tx']);
     expect(wire.requests, isEmpty);
   });
+  for (final (status, kind) in [
+    (429, OnlineErrorKind.rateLimited),
+    (403, OnlineErrorKind.rejected),
+    (0, OnlineErrorKind.rejected),
+  ]) {
+    test(
+      'parallel peer cannot redirect or hide terminal outcome $status',
+      () async {
+        await install();
+        final lateResponse = Completer<void>();
+        apiReply = (request, scope) async {
+          if (fetches == 1) {
+            await lateResponse.future;
+            expect(scope.cancelled, isTrue);
+            expect(request.onRedirect!, throwsA(isA<PcmCancelled>()));
+            // A transport may finish after its caller cancelled it.
+            return {'statusCode': 200};
+          }
+          if (status == 0) {
+            throw const LxRequestException(LxRequestFailure.privateAddress);
+          }
+          return {'statusCode': status};
+        };
+        reply = (_, send, work) async {
+          final peer = expectLater(
+            request(send, work),
+            throwsA(isA<PcmCancelled>()),
+          );
+          await request(send, work);
+          expect(await request(send, work), {'error': 'denied'});
+          lateResponse.complete();
+          await peer;
+          return {'url': _url};
+        };
+        await expectLater(
+          play(fallback: 'qq'),
+          throwsA(isA<OnlineException>().having((e) => e.kind, 'kind', kind)),
+        );
+        expect(fetches, 2);
+        expect(attempts, ['tx']);
+        expect(qq.calls, isEmpty);
+        expect(wire.requests, isEmpty);
+        expect(opens, 0);
+        final events =
+            (jsonDecode(utf8.decode(diagnostics.export({}).bytes))
+                    as Map)['events']
+                as List;
+        final starts = events.where((r) => r['event'] == 'lxApiStart');
+        expect(starts.map((r) => r['inFlight']), [1, 2]);
+        expect(starts.map((r) => r['timeoutMs']), [6000, 6000]);
+      },
+    );
+  }
+
+  for (final secondWins in [true, false]) {
+    test(
+      'out-of-order callbacks keep newest candidate failure attribution (success: $secondWins)',
+      () async {
+        declared = {
+          'tx': ['flac'],
+        };
+        await install();
+        final release = Completer<void>();
+        apiReply = (_, _) async {
+          if (fetches == 1) {
+            await release.future;
+            if (secondWins) {
+              throw const LxRequestException(LxRequestFailure.dns);
+            }
+          } else if (!secondWins) {
+            throw const LxRequestException(LxRequestFailure.timeout);
+          }
+          return {'statusCode': 200};
+        };
+        reply = (_, send, work) async {
+          final first = request(send, work);
+          await request(send, work);
+          release.complete();
+          await first;
+          return {'error': 'unavailable'};
+        };
+        await expectLater(
+          play(),
+          throwsA(
+            secondWins
+                ? isA<OnlineException>().having(
+                    (e) => e.kind,
+                    'kind',
+                    OnlineErrorKind.unavailable,
+                  )
+                : isA<LxRequestException>().having(
+                    (e) => e.reason,
+                    'reason',
+                    LxRequestFailure.timeout,
+                  ),
+          ),
+        );
+        expect(fetches, 2);
+      },
+    );
+  }
+
+  test('overlapping redirects spend the same four-hop allowance and cannot reset it by switching', () async {
+    await install();
+    final both = Completer<void>();
+    int hops = 0;
+    apiReply = (req, _) async {
+      hops++;
+      if (fetches == 2) both.complete();
+      await both.future;
+      req.onRedirect!();
+      hops++;
+      await Future<void>.delayed(Duration.zero);
+      req.onRedirect!();
+      hops++;
+      return {'statusCode': 200};
+    };
+    reply = (_, send, work) async {
+      Future<void> one() async {
+        try {
+          await request(send, work);
+        } on PcmCancelled {
+          /* peer was stopped */
+        }
+      }
+
+      await Future.wait([one(), one()]);
+      return {'url': _url};
+    };
+    await expectLater(
+      play(fallback: 'qq'),
+      throwsA(
+        isA<LxRequestException>().having(
+          (e) => e.reason,
+          'reason',
+          LxRequestFailure.budget,
+        ),
+      ),
+    );
+    expect(hops, 4);
+    expect(attempts, ['tx']);
+    expect(qq.calls, isEmpty);
+    expect(wire.requests, isEmpty);
+  });
+
   for (final (status, kind) in [
     (429, OnlineErrorKind.rateLimited),
     (403, OnlineErrorKind.rejected),

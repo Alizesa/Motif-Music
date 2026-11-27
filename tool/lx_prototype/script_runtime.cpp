@@ -14,6 +14,12 @@ constexpr char kPrelude[] =
     ;
 constexpr char kError[] = R"({"error":"script"})";
 
+// Q has a JSON request id; X cancels exactly one of the 12 allowed ids.
+bool IsCancelCommand(std::string_view message) {
+  return (message.size() == 2 && message[0] == 'X' && message[1] >= '1' && message[1] <= '9') ||
+         (message.size() == 3 && message.starts_with("X1") && message[2] >= '0' && message[2] <= '2');
+}
+
 struct ScriptRuntime {
   JSRuntime* runtime = JS_NewRuntime();
   JSContext* context = nullptr;
@@ -105,7 +111,7 @@ std::string RunLxScript(std::string_view script, std::string_view parameters,
     if (message[0] == 'D') return message.substr(1);
     if (message == "W") {
       std::this_thread::sleep_for(12ms);
-    } else if ((message[0] == 'Q' && ++requests <= 12) || message == "P" || message == "X") {
+    } else if ((message[0] == 'Q' && ++requests <= 12) || message == "P" || IsCancelCommand(message)) {
       if (message == "P") std::this_thread::sleep_for(15ms);
       response = request(opaque, message);
       if (response.empty() || response.size() > kLxMessageBytes) return kError;
