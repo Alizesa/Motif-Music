@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../audio/audio_engine.dart';
 import '../../diagnostics/diagnostic_recorder.dart';
 import '../../downloads/download_controller.dart';
+import '../../downloads/download_directory_store.dart';
 import '../../downloads/platform_download_destination.dart';
 import '../downloads/download_page.dart';
 import '../../audio/mpv_audio_engine.dart';
@@ -131,6 +132,12 @@ class _MotifHomePageState extends State<MotifHomePage>
     _downloads = DownloadController(
       sources: _sources,
       destination: const PlatformDownloadDestination(),
+      directoryStore: FileDownloadDirectoryStore(() async {
+        final support = await getApplicationSupportDirectory();
+        return File.fromUri(
+          support.uri.resolve('download-settings/directory.json'),
+        );
+      }),
       diagnostics: _diagnostics,
     );
     _playback = OnlinePlaybackController(

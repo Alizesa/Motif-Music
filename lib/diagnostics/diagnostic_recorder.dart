@@ -109,7 +109,15 @@ enum DiagnosticSource { qq, lx, other }
 
 enum DiagnosticMedium { file, directStream, mp3, flac, wave }
 
-enum DiagnosticStage { preferences, resolve, engine, directory, transfer, save }
+enum DiagnosticStage {
+  preferences,
+  resolve,
+  engine,
+  directory,
+  transfer,
+  write,
+  save,
+}
 
 enum DiagnosticAction { play, pause, next, previous, seek, retry }
 

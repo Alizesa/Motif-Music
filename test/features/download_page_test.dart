@@ -7,6 +7,7 @@ import 'package:motif/audio/controlled_pcm.dart';
 import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/downloads/download_controller.dart';
 import 'package:motif/downloads/download_destination.dart';
+import 'package:motif/downloads/download_directory_store.dart';
 import 'package:motif/features/downloads/download_page.dart';
 import 'package:motif/online/domain/download_source.dart';
 import 'package:motif/online/domain/music_source_registry.dart';
@@ -16,6 +17,54 @@ import 'package:motif/online/qq/qq_track.dart';
 import '../online/playback_fakes.dart';
 
 void main() {
+  testWidgets(
+    'opening the sheet restores the remembered folder; a second song needs no picker',
+    (tester) async {
+      final source = _Source();
+      final dest = _Destination();
+      final store = _Saved();
+      final controller = DownloadController(
+        sources: MusicSourceRegistry(
+          qq: FakePlaybackSource('qq'),
+          thirdPartySources: [
+            MusicSourceRegistration(name: 'Source', resolver: source),
+          ],
+        ),
+        destination: dest,
+        directoryStore: store,
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => unawaited(
+                showTrackDownloadSheet(
+                  context,
+                  controller: controller,
+                  track: playbackTrack(1),
+                  preferredSourceId: 'script',
+                  quality: OnlineQuality.standard,
+                ),
+              ),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      );
+      expect(store.loads, 0);
+      for (var i = 0; i < 2; i++) {
+        await tester.tap(find.text('Open'));
+        await tester.pumpAndSettle();
+        expect(find.text('Selected folder'), findsOneWidget);
+        await tester.tap(find.text('开始下载'));
+        await tester.pumpAndSettle();
+      }
+      expect(source.transfers, 2);
+      expect(dest.picks, 0);
+      expect(store.loads, 1);
+    },
+  );
   testWidgets(
     'download sheet requires a directory, then starts the selected source and quality',
     (tester) async {
@@ -139,9 +188,16 @@ class _Source extends FakePlaybackSource implements TrackDownloadSource {
 
 class _Destination implements DownloadDestination {
   int aborted = 0;
+  int picks = 0;
   @override
-  Future<DownloadDirectory?> chooseDirectory() async =>
-      DownloadDirectory(Uri.parse('file:///selected'), 'Selected folder');
+  Future<DownloadDirectory> restoreDirectory(Uri uri) async =>
+      DownloadDirectory(uri, 'Selected folder');
+  @override
+  Future<DownloadDirectory?> chooseDirectory() async {
+    picks++;
+    return DownloadDirectory(Uri.parse('file:///selected'), 'Selected folder');
+  }
+
   @override
   Future<DownloadWriter> create(DownloadDirectory directory) async =>
       _Writer(this);
@@ -160,4 +216,16 @@ class _Writer implements DownloadWriter {
   @override
   Future<DownloadReceipt> finish(String basename, String extension) async =>
       DownloadReceipt('$basename.$extension', '/selected/$basename.$extension');
+}
+
+class _Saved implements DownloadDirectoryStore {
+  int loads = 0;
+  @override
+  Future<Uri?> load() async {
+    loads++;
+    return Uri.parse('file:///selected');
+  }
+
+  @override
+  Future<void> save(Uri uri) async => throw StateError('no selection expected');
 }

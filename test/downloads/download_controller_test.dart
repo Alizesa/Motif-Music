@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart' show PlatformException;
@@ -7,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:motif/audio/controlled_pcm.dart';
 import 'package:motif/diagnostics/diagnostic_recorder.dart';
 import 'package:motif/downloads/download_controller.dart';
+import 'package:motif/downloads/download_directory_store.dart';
+import 'package:motif/downloads/platform_download_destination.dart';
 import 'package:motif/downloads/download_destination.dart';
 import 'package:motif/online/domain/download_source.dart';
 import 'package:motif/online/domain/music_source_registry.dart';
@@ -47,6 +50,152 @@ void main() {
     diagnostics.dispose();
   });
 
+  Future<void> restart(
+    DownloadDirectoryStore store, [
+    DownloadDestination? adapter,
+  ]) async {
+    final registry = controller.sources;
+    await controller.close();
+    controller.dispose();
+    controller = DownloadController(
+      sources: registry,
+      destination: adapter ?? destination,
+      diagnostics: diagnostics,
+      directoryStore: store,
+    );
+  }
+
+  test('Windows remembers a picker URI across sessions and saves both files without prompting or overwriting', () async {
+    final root = await Directory.systemTemp.createTemp('motif-remember-');
+    addTearDown(() => root.delete(recursive: true));
+    final dir = await Directory.fromUri(root.uri.resolve('下载%20%23100%25'))
+        .create();
+    final store = FileDownloadDirectoryStore(
+      () async => File.fromUri(root.uri.resolve('private/dir.json')),
+    );
+    var picks = 0;
+    final platform = PlatformDownloadDestination(
+      windowsPicker: () async {
+        picks++;
+        return Uri.directory(dir.path, windows: true);
+      },
+    );
+    await restart(store, platform);
+    await controller.chooseDirectory();
+    expect(
+      dir.listSync(),
+      isEmpty,
+      reason: 'explicit selection cleans up its write probe',
+    );
+    await controller.start(track, 'test', OnlineQuality.standard);
+    final first = controller.tasks.single.receipt!;
+    await restart(store, platform);
+    expect(controller.tasks, isEmpty);
+    await controller.start(track, 'test', OnlineQuality.standard);
+    final second = controller.tasks.single.receipt!;
+    expect(picks, 1);
+    expect(first.location, isNot(second.location));
+    for (final receipt in [first, second]) {
+      expect(await File(receipt.location).readAsBytes(), List.filled(8, 7));
+    }
+    expect(dir.listSync(), hasLength(2));
+    await dir.delete(recursive: true);
+    await restart(store, platform);
+    await controller.directoryReady;
+    expect(controller.directory, isNull);
+    expect(controller.error, contains('重新选择'));
+    await controller.start(track, 'test', OnlineQuality.standard);
+    expect(source.calls, 2);
+    expect(picks, 1);
+  }, skip: !Platform.isWindows);
+
+  test('restoration is lazy, shared and cannot replace a later choice; cancelling a picker keeps it', () async {
+    final store = _Store()..readGate = Completer<Uri?>();
+    await restart(store);
+    expect(store.loads, 0);
+    final ready = controller.directoryReady;
+    expect(store.loads, 1);
+    final change = controller.chooseDirectory();
+    expect(destination.picks, 0);
+    expect(controller.choosing, isTrue);
+    store.readGate!.complete(Uri.parse('file:///previous'));
+    await ready;
+    await change;
+    expect(store.saved, [destination.selected.uri]);
+    expect(controller.directory?.uri, destination.selected.uri);
+    destination.cancelPick = true;
+    await controller.chooseDirectory();
+    expect(store.saved, hasLength(1));
+    expect(controller.directory?.uri, destination.selected.uri);
+  });
+  test('remembering failure does not discard the working selection or serialize tasks', () async {
+    await restart(_Store()..failSave = true);
+    await controller.chooseDirectory();
+    expect(controller.error, contains('未能记住'));
+    expect(controller.directory, same(destination.selected));
+    await controller.start(track, 'test', OnlineQuality.standard);
+    expect(controller.tasks.single.status, DownloadStatus.completed);
+  });
+  test('revoked saved grant cannot start a download and retry requires a valid selection', () async {
+    final store = _Store()
+      ..uri = Uri.parse('content://documents/tree/remembered');
+    destination.restoreFailure = PlatformException(
+      code: 'download_permission',
+      message: 'sensitive locator',
+    );
+    await restart(store);
+    await controller.directoryReady;
+    expect(controller.directory, isNull);
+    expect(controller.error, contains('重新选择'));
+    expect(destination.picks, 0);
+    await controller.start(track, 'test', OnlineQuality.standard);
+    expect(source.calls, 0);
+    await controller.chooseDirectory();
+    destination.createFailure = PlatformException(code: 'download_permission');
+    await controller.start(track, 'test', OnlineQuality.standard);
+    final failed = controller.tasks.single;
+    expect(failed.error, contains('权限'));
+    expect(controller.directory, isNull);
+    await controller.retry(failed);
+    expect(source.calls, 0);
+    destination.createFailure = null;
+    await controller.chooseDirectory();
+    await controller.retry(failed);
+    expect(controller.tasks, [same(failed)]);
+    expect(failed.status, DownloadStatus.completed);
+  });
+  test('disk full is a write failure, not a permission or source error; keep directory for retry', () async {
+    await controller.chooseDirectory();
+    diagnostics.setEnabled(true);
+    destination.writeFailure = PlatformException(
+      code: 'download_space',
+      message: 'private disk path',
+    );
+    await controller.start(track, 'test', OnlineQuality.standard);
+    final task = controller.tasks.single;
+    expect(task.error, contains('写入下载数据'));
+    expect(task.error, contains('空间不足'));
+    expect(task.received, 0);
+    expect(destination.writers.single.aborted, isTrue);
+    expect(controller.directory, isNotNull);
+    final text = utf8.decode(diagnostics.export({}).bytes);
+    final end = (jsonDecode(text)['events'] as List).singleWhere(
+      (r) => r['event'] == 'downloadFinished',
+    );
+    expect(end['stage'], 'write');
+    expect(end['reason'], 'noSpace');
+    expect(text, isNot(contains('private disk path')));
+  });
+  test(
+    'source-side filesystem I/O is not mislabeled as a destination failure',
+    () async {
+      await controller.chooseDirectory();
+      source.otherFailure = const FileSystemException('private script path');
+      await controller.start(track, 'test', OnlineQuality.standard);
+      expect(controller.tasks.single.error, contains('音源'));
+      expect(controller.directory, isNotNull);
+    },
+  );
   test('no directory means no file and no source request', () async {
     await controller.start(track, 'test', OnlineQuality.standard);
     expect(source.calls, 0);
@@ -169,7 +318,8 @@ void main() {
     );
     await controller.start(track, 'test', OnlineQuality.standard);
     expect(controller.tasks.single.status, DownloadStatus.failed);
-    expect(controller.tasks.single.error, contains('保存目录权限'));
+    expect(controller.tasks.single.error, contains('准备下载目录失败'));
+    expect(controller.tasks.single.error, isNot(contains('权限')));
     expect(
       controller.tasks.single.error,
       isNot(contains('private content URI')),
@@ -182,6 +332,7 @@ void main() {
     destination.failCommit = true;
     await controller.start(track, 'test', OnlineQuality.standard);
     expect(controller.tasks.single.status, DownloadStatus.failed);
+    expect(controller.tasks.single.error, contains('保存最终文件'));
     expect(controller.tasks.single.receipt, isNull);
     expect(destination.writers.single.aborted, isTrue);
   });
@@ -229,6 +380,7 @@ class _Qq implements PlaybackUrlResolver {
 class _Source implements PlaybackUrlResolver, TrackDownloadSource {
   int calls = 0;
   bool fail = false;
+  Object? otherFailure;
   final started = Completer<void>();
   Completer<void>? gate;
   @override
@@ -248,6 +400,7 @@ class _Source implements PlaybackUrlResolver, TrackDownloadSource {
     if (!started.isCompleted) started.complete();
     if (gate != null) await cancellation.until(gate!.future);
     cancellation.check();
+    if (otherFailure case final failure?) throw failure;
     onTotal(8);
     if (fail) {
       await write(Uint8List.fromList([7, 7, 7]));
@@ -273,16 +426,28 @@ class _Destination implements DownloadDestination {
   );
   final creating = Completer<void>();
   Completer<void>? creation;
-  Object? createFailure;
+  Object? createFailure, restoreFailure, writeFailure;
+  bool cancelPick = false;
+  int picks = 0;
   bool failCommit = false;
   @override
-  Future<DownloadDirectory?> chooseDirectory() async => selected;
+  Future<DownloadDirectory?> chooseDirectory() async {
+    picks++;
+    return cancelPick ? null : selected;
+  }
+
+  @override
+  Future<DownloadDirectory> restoreDirectory(Uri uri) async {
+    if (restoreFailure case final failure?) throw failure;
+    return DownloadDirectory(uri, 'Restored');
+  }
+
   @override
   Future<DownloadWriter> create(DownloadDirectory directory) async {
     if (!creating.isCompleted) creating.complete();
     if (createFailure case final failure?) throw failure;
     if (creation != null) await creation!.future;
-    final writer = _Writer(failCommit);
+    final writer = _Writer(failCommit, writeFailure);
     createdIn.add(directory);
     writers.add(writer);
     return writer;
@@ -290,13 +455,18 @@ class _Destination implements DownloadDestination {
 }
 
 class _Writer implements DownloadWriter {
-  _Writer(this.failCommit);
+  _Writer(this.failCommit, this.writeFailure);
+  final Object? writeFailure;
   final bool failCommit;
   final bytes = <int>[];
   bool aborted = false;
   String? name;
   @override
-  Future<void> write(Uint8List chunk) async => bytes.addAll(chunk);
+  Future<void> write(Uint8List chunk) async {
+    if (writeFailure case final failure?) throw failure;
+    bytes.addAll(chunk);
+  }
+
   @override
   Future<void> abort() async {
     aborted = true;
@@ -310,5 +480,25 @@ class _Writer implements DownloadWriter {
       '$basename.$extension',
       '/chosen/$basename.$extension',
     );
+  }
+}
+
+class _Store implements DownloadDirectoryStore {
+  Uri? uri;
+  int loads = 0;
+  final saved = <Uri>[];
+  bool failSave = false;
+  Completer<Uri?>? readGate;
+  @override
+  Future<Uri?> load() async {
+    loads++;
+    return readGate == null ? uri : await readGate!.future;
+  }
+
+  @override
+  Future<void> save(Uri value) async {
+    if (failSave) throw StateError('fixture');
+    uri = value;
+    saved.add(value);
   }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart' show PlatformException;
 import 'package:mpv_audio_kit/mpv_audio_kit.dart' show MpvCommandException;
 
 import '../audio/controlled_pcm.dart';
+import '../downloads/download_storage_error.dart';
 import '../library/domain/library_playback_error.dart';
 import '../online/domain/online_error.dart';
 import '../online/lx/fixture/lx_fixture_wave.dart';
@@ -30,6 +31,7 @@ enum _Failure {
 /// [error], [PlatformException.details] or a native error message to a report.
 DiagnosticFacts diagnosticFailure(Object error) => {
   DiagnosticField.reason: switch (error) {
+    DownloadStorageException(:final problem) => problem,
     LxRequestException(:final reason) => reason,
     OnlineException(:final kind) => kind,
     LibraryPlaybackException(:final kind) => kind,
@@ -49,6 +51,7 @@ DiagnosticFacts diagnosticFailure(Object error) => {
     _ => _Failure.unknown,
   },
   DiagnosticField.code: switch (error) {
+    DownloadStorageException(:final osCode) => osCode,
     MpvCommandException(:final code) => code,
     FileSystemException(:final osError) => osError?.errorCode,
     SocketException(:final osError) => osError?.errorCode,

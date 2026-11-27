@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 
 import '../audio/controlled_pcm.dart';
 import '../diagnostics/diagnostic_failure.dart';
@@ -12,6 +10,8 @@ import '../online/domain/online_error.dart';
 import '../online/domain/playback_source.dart';
 import '../online/qq/qq_track.dart';
 import 'download_destination.dart';
+import 'download_directory_store.dart';
+import 'download_storage_error.dart';
 
 enum DownloadStatus {
   resolving,
@@ -59,45 +59,97 @@ final class DownloadController extends ChangeNotifier {
     required this.sources,
     required this.destination,
     this.diagnostics,
+    this.directoryStore,
   });
+  final DownloadDirectoryStore? directoryStore;
+  // A saved directory can be on a removable drive, network share or cloud
+  // provider. Don't touch it just because the user opened the music player.
+  late final Future<void> directoryReady = _restoreDirectory();
+  Future<void>? _savingSelection;
   final DiagnosticRecorder? diagnostics;
   final MusicSourceRegistry sources;
   int _nextTask = 0;
   final DownloadDestination destination;
   final List<DownloadTask> _tasks = [];
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
-  DownloadDirectory? directory;
+  DownloadDirectory? _directory;
+  DownloadDirectory? get directory => _directory;
   String? error;
-  bool choosing = false;
+  bool _picking = false;
+  bool _restoring = false;
+  bool get restoring => _restoring;
+  bool get choosing => _picking || _restoring;
   bool get busy => _active != null;
   DownloadTask? _active;
   PcmCancellation? _work;
   Future<void>? _running;
   bool _closed = false;
 
-  Future<void> chooseDirectory() async {
-    if (choosing || busy || _closed) return;
-    choosing = true;
-    error = null;
-    _notify();
+  Future<void> _restoreDirectory() async {
+    final store = directoryStore;
+    if (store == null) return;
+    _restoring = true;
     try {
-      final picked = await destination.chooseDirectory();
-      if (!_closed && picked != null) directory = picked;
-    } catch (_) {
-      error = '无法访问保存目录，请重新选择。';
+      final uri = await store.load();
+      if (uri == null || _closed) return;
+      final restored = await destination
+          .restoreDirectory(uri)
+          .timeout(const Duration(seconds: 5));
+      if (!_closed) _directory = restored;
+    } catch (failure) {
+      if (!_closed) {
+        error = switch (DownloadStorageException.from(failure).problem) {
+          DownloadStorageProblem.permission => '上次保存目录的写入授权已失效或目录不可写，请重新选择。',
+          DownloadStorageProblem.unavailable => '上次保存目录已不存在或存储设备未连接，请重新选择。',
+          _ => '无法恢复上次的保存目录，请重新选择。',
+        };
+      }
     } finally {
-      choosing = false;
+      _restoring = false;
       _notify();
     }
   }
 
-  Future<void> start(QqTrack track, String sourceId, OnlineQuality quality) {
-    if (_closed || busy || choosing) return Future.value();
+  Future<void> chooseDirectory() async {
+    if (_picking || busy || _closed) return;
+    _picking = true;
+    _notify();
+    try {
+      await directoryReady;
+      if (_closed) return;
+      final picked = await destination.chooseDirectory();
+      // Cancelling retains the previous choice.
+      if (_closed || picked == null) return;
+      _directory = picked;
+      error = null;
+      try {
+        await (_savingSelection = directoryStore?.save(picked.uri));
+      } catch (_) {
+        error = '已选择本次保存目录，但未能记住此更改。';
+      } finally {
+        _savingSelection = null;
+      }
+    } catch (failure) {
+      error = DownloadStorageException.from(failure).message('选择保存目录');
+    } finally {
+      _picking = false;
+      _notify();
+    }
+  }
+
+  Future<void> start(
+    QqTrack track,
+    String sourceId,
+    OnlineQuality quality,
+  ) async {
+    if (_closed || busy || _picking) return;
+    await directoryReady;
+    if (_closed || busy || choosing) return;
     final target = directory;
     if (target == null) {
       error = '请先选择保存目录。';
       _notify();
-      return Future.value();
+      return;
     }
     final task = DownloadTask._(++_nextTask, track, sourceId, quality, target);
     _tasks.insert(0, task);
@@ -114,7 +166,13 @@ final class DownloadController extends ChangeNotifier {
       return Future.value();
     }
     // A newly selected directory can recover the same task from a stale grant.
-    task._directory = directory ?? task.directory;
+    final target = directory;
+    if (target == null) {
+      error = '请先重新选择保存目录。';
+      _notify();
+      return Future.value();
+    }
+    task._directory = target;
     task._status = DownloadStatus.resolving;
     task._received = 0;
     task._total = null;
@@ -180,7 +238,9 @@ final class DownloadController extends ChangeNotifier {
         trace: trace,
         write: (bytes) async {
           work.check();
+          stage = DiagnosticStage.write;
           await output.write(bytes);
+          stage = DiagnosticStage.transfer;
           work.check();
           task._received += bytes.length;
           task._status = DownloadStatus.downloading;
@@ -220,19 +280,37 @@ final class DownloadController extends ChangeNotifier {
       task._status = work.cancelled
           ? DownloadStatus.cancelled
           : DownloadStatus.failed;
+      final storageAction = switch (stage) {
+        DiagnosticStage.directory => '准备下载目录',
+        DiagnosticStage.write => '写入下载数据',
+        DiagnosticStage.save => '保存最终文件',
+        _ => null,
+      };
+      final storage = storageAction == null
+          ? null
+          : DownloadStorageException.from(failure);
       task._error = work.cancelled
           ? null
+          : storage != null
+          ? storage.message(storageAction!)
           : failure is OnlineException
           ? failure.toString()
-          : _isDestinationFailure(failure)
-          ? '无法写入文件，请检查保存目录权限和可用空间。'
-          : '下载未完成，请检查音源和保存目录后重试。';
+          : '下载未完成，请检查音源后重试。';
+      if (!work.cancelled &&
+          storage != null &&
+          (storage.problem == DownloadStorageProblem.permission ||
+              storage.problem == DownloadStorageProblem.unavailable) &&
+          _directory?.uri == task.directory.uri) {
+        // Do not silently fall back to another folder or reuse a revoked grant.
+        _directory = null;
+        error = '当前保存目录不可用，请重新选择。';
+      }
       if (trace?.active == true) {
         trace!.record(DiagnosticEvent.downloadFinished, {
           DiagnosticField.stage: stage,
           DiagnosticField.state: task.status,
           DiagnosticField.bytes: task.received,
-          if (!work.cancelled) ...diagnosticFailure(failure),
+          if (!work.cancelled) ...diagnosticFailure(storage ?? failure),
         });
       }
     } finally {
@@ -241,7 +319,10 @@ final class DownloadController extends ChangeNotifier {
           await writer.abort();
         } catch (_) {
           trace?.record(DiagnosticEvent.downloadCleanupFailure);
-          task._error = '临时文件未能清理，请检查保存目录后重试。';
+          task._error = [
+            if (task._error != null) task._error,
+            '临时文件未能清理，请检查保存目录。',
+          ].join(' ');
         }
       }
       work.cancel();
@@ -251,17 +332,18 @@ final class DownloadController extends ChangeNotifier {
     }
   }
 
-  bool _isDestinationFailure(Object failure) =>
-      failure is FileSystemException ||
-      failure is PlatformException &&
-          const {'download_io', 'download_directory'}.contains(failure.code);
-
   Future<void> close() async {
     if (!_closed) {
       _closed = true;
       _work?.cancel();
     }
     await _running;
+    // A selection already handed to the store is committed even during exit.
+    try {
+      await _savingSelection;
+    } catch (_) {
+      /* surfaced by chooseDirectory */
+    }
   }
 
   void _notify() {

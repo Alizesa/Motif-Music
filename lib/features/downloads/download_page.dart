@@ -7,9 +7,22 @@ import '../../online/domain/download_source.dart';
 import '../../online/domain/playback_source.dart';
 import '../../online/qq/qq_track.dart';
 
-class DownloadPage extends StatelessWidget {
+class DownloadPage extends StatefulWidget {
   const DownloadPage({super.key, required this.controller});
   final DownloadController controller;
+
+  @override
+  State<DownloadPage> createState() => _DownloadPageState();
+}
+
+class _DownloadPageState extends State<DownloadPage> {
+  DownloadController get controller => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(controller.directoryReady);
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -22,7 +35,11 @@ class DownloadPage extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.folder_outlined),
             title: const Text('保存目录'),
-            subtitle: Text(controller.directory?.label ?? '尚未选择'),
+            subtitle: Text(
+              controller.restoring
+                  ? '正在恢复保存目录…'
+                  : controller.directory?.label ?? '尚未选择',
+            ),
             trailing: const Icon(Icons.edit_outlined),
             onTap: controller.busy || controller.choosing
                 ? null
@@ -32,7 +49,7 @@ class DownloadPage extends StatelessWidget {
             Padding(padding: const EdgeInsets.all(12), child: Text(error)),
           const Padding(
             padding: EdgeInsets.all(12),
-            child: Text('下载时请保持应用运行。已下载的文件保存在所选目录中。'),
+            child: Text('应用会记住保存目录，下次下载可直接使用，也可在这里更换。下载时请保持应用运行。'),
           ),
           if (controller.tasks.isEmpty)
             const Padding(
@@ -90,7 +107,10 @@ class DownloadPage extends StatelessWidget {
                       ),
                     if (task.retryable)
                       TextButton(
-                        onPressed: controller.busy || controller.choosing
+                        onPressed:
+                            controller.busy ||
+                                controller.choosing ||
+                                controller.directory == null
                             ? null
                             : () => unawaited(controller.retry(task)),
                         child: const Text('重新下载'),
@@ -157,6 +177,7 @@ class _DownloadSheetState extends State<_DownloadSheet> {
   @override
   void initState() {
     super.initState();
+    unawaited(widget.controller.directoryReady);
     final sources = widget.controller.sources.downloadSources;
     _source = sources.any((source) => source.id == widget.preferredSourceId)
         ? widget.preferredSourceId
@@ -244,7 +265,11 @@ class _DownloadSheetState extends State<_DownloadSheet> {
                     ? null
                     : () => unawaited(controller.chooseDirectory()),
                 icon: const Icon(Icons.folder_open_outlined),
-                label: Text(controller.directory?.label ?? '选择保存目录'),
+                label: Text(
+                  controller.restoring
+                      ? '正在恢复保存目录…'
+                      : controller.directory?.label ?? '选择保存目录',
+                ),
               ),
               if (controller.error case final error?) Text(error),
               if (controller.busy) const Text('已有一首歌曲正在下载，请完成或取消后再试。'),

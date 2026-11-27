@@ -3,4 +3,5 @@
     <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
     <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml" />
     <exclude domain="file" path="lx-sources" />
+    <exclude domain="file" path="download-settings" />
 </full-backup-content>

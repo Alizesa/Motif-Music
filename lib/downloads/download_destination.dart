@@ -6,6 +6,32 @@ final class DownloadDirectory {
   final String label;
 }
 
+/// Reject drive-relative paths and non-tree document URIs before restoring
+/// a saved locator. Dart canonicalizes e.g. `file:relative` to `/relative`,
+/// which is not an absolute drive path on Windows.
+bool isWindowsDownloadDirectoryUri(Uri uri) =>
+    uri.scheme == 'file' &&
+    uri.userInfo.isEmpty &&
+    !uri.hasPort &&
+    !uri.hasQuery &&
+    !uri.hasFragment &&
+    (uri.host.isEmpty
+        ? RegExp(r'^/[a-zA-Z]:/').hasMatch(uri.path)
+        : uri.host != '.' &&
+              uri.host != '..' &&
+              uri.host != '?' &&
+              uri.pathSegments.isNotEmpty &&
+              uri.pathSegments.first.isNotEmpty);
+
+bool isSafDownloadDirectoryUri(Uri uri) =>
+    uri.scheme == 'content' &&
+    uri.host.isNotEmpty &&
+    !uri.hasQuery &&
+    !uri.hasFragment &&
+    uri.pathSegments.length >= 2 &&
+    uri.pathSegments.first == 'tree' &&
+    uri.pathSegments[1].isNotEmpty;
+
 final class DownloadReceipt {
   const DownloadReceipt(this.name, this.location);
   final String name;
@@ -14,6 +40,9 @@ final class DownloadReceipt {
 
 abstract interface class DownloadDestination {
   Future<DownloadDirectory?> chooseDirectory();
+
+  /// Resolve only this previously chosen directory, without prompting or creating it.
+  Future<DownloadDirectory> restoreDirectory(Uri uri);
   Future<DownloadWriter> create(DownloadDirectory directory);
 }
 

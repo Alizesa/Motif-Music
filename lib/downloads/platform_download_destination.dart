@@ -7,9 +7,11 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 
 import 'download_destination.dart';
+import 'download_storage_error.dart';
 
 final class PlatformDownloadDestination implements DownloadDestination {
-  const PlatformDownloadDestination();
+  const PlatformDownloadDestination({this.windowsPicker});
+  final Future<Uri?> Function()? windowsPicker;
   static const channel = MethodChannel('motif/downloads');
 
   @override
@@ -17,8 +19,43 @@ final class PlatformDownloadDestination implements DownloadDestination {
     if (Platform.isAndroid) {
       return const SafDownloadDestination().chooseDirectory();
     }
-    final uri = await FilePicker.pickDirectory(dialogTitle: '选择下载保存目录');
-    return uri == null ? null : DownloadDirectory(uri, uri.toFilePath());
+    if (!Platform.isWindows) {
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+    }
+    final pick =
+        windowsPicker ??
+        () => FilePicker.pickDirectory(dialogTitle: '选择下载保存目录');
+    final uri = await pick();
+    if (uri == null) return null;
+    final selected = await restoreDirectory(uri);
+    // Validate effective create/delete access on explicit selection only. Don't
+    // overwrite a working preference just because a read-only folder exists.
+    final probe = await FileDownloadWriter.create(_windowsFolder(selected.uri));
+    await probe.abort();
+    return selected;
+  }
+
+  @override
+  Future<DownloadDirectory> restoreDirectory(Uri uri) async {
+    if (Platform.isAndroid) {
+      return const SafDownloadDestination().restoreDirectory(uri);
+    }
+    final folder = _windowsFolder(uri);
+    if (!await folder.exists()) {
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+    }
+    return DownloadDirectory(folder.uri, folder.path);
+  }
+
+  Directory _windowsFolder(Uri uri) {
+    if (!Platform.isWindows || !isWindowsDownloadDirectoryUri(uri)) {
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+    }
+    final folder = Directory.fromUri(uri);
+    if (!folder.isAbsolute) {
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+    }
+    return folder;
   }
 
   @override
@@ -26,10 +63,7 @@ final class PlatformDownloadDestination implements DownloadDestination {
     if (Platform.isAndroid) {
       return const SafDownloadDestination().create(directory);
     }
-    if (!Platform.isWindows || directory.uri.scheme != 'file') {
-      throw const FileSystemException('Download directory unavailable');
-    }
-    return FileDownloadWriter.create(Directory.fromUri(directory.uri));
+    return FileDownloadWriter.create(_windowsFolder(directory.uri));
   }
 }
 
@@ -43,11 +77,31 @@ final class SafDownloadDestination implements DownloadDestination {
       'pickDirectory',
     );
     if (value == null) return null;
-    final uri = Uri.parse(value['uri'] as String);
-    if (uri.scheme != 'content' || uri.host.isEmpty) {
-      throw const FileSystemException('Invalid download directory');
+    return _directory(value);
+  }
+
+  DownloadDirectory _directory(Map<String, Object?>? value, [Uri? expected]) {
+    if (value case {'uri': String raw, 'label': String label}) {
+      final uri = Uri.tryParse(raw);
+      if (uri != null &&
+          isSafDownloadDirectoryUri(uri) &&
+          (expected == null || expected == uri)) {
+        return DownloadDirectory(uri, label);
+      }
     }
-    return DownloadDirectory(uri, value['label'] as String);
+    throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+  }
+
+  @override
+  Future<DownloadDirectory> restoreDirectory(Uri uri) async {
+    if (!isSafDownloadDirectoryUri(uri)) {
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
+    }
+    final value = await _channel.invokeMapMethod<String, Object?>(
+      'restoreDirectory',
+      {'directory': uri.toString()},
+    );
+    return _directory(value, uri);
   }
 
   @override
@@ -72,16 +126,14 @@ final class FileDownloadWriter implements DownloadWriter {
 
   static Future<FileDownloadWriter> create(Directory directory) async {
     if (!await directory.exists()) {
-      throw const FileSystemException('Directory unavailable');
+      throw const DownloadStorageException(DownloadStorageProblem.unavailable);
     }
     final random = Random.secure();
     final token = List.generate(
       24,
       (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
     ).join();
-    final file = File(
-      '${directory.path}${Platform.pathSeparator}.motif-$token.part',
-    );
+    final file = _child(directory, '.motif-$token.part');
     await file.create(exclusive: true);
     try {
       return FileDownloadWriter._(
@@ -93,6 +145,11 @@ final class FileDownloadWriter implements DownloadWriter {
       rethrow;
     }
   }
+
+  // Directory URIs from the picker already end with a separator. A second
+  // separator may work with dart:io but is literal in MoveFileW's extended path.
+  static File _child(Directory parent, String name) =>
+      File.fromUri(parent.absolute.uri.resolveUri(Uri(pathSegments: [name])));
 
   @override
   Future<void> write(Uint8List bytes) async {
@@ -114,21 +171,24 @@ final class FileDownloadWriter implements DownloadWriter {
     output = null;
     for (var index = 0; index < 1000; index++) {
       final name = '$basename${index == 0 ? '' : ' ($index)'}.$extension';
-      final destination = '${file.parent.path}${Platform.pathSeparator}$name';
+      final destination = _child(file.parent, name).path;
       if (_moveWithoutReplacement(file.path, destination)) {
         _finished = true;
         return DownloadReceipt(name, destination);
       }
     }
-    throw const FileSystemException('No unused download name');
+    throw const DownloadStorageException(DownloadStorageProblem.name);
   }
 
   @override
   Future<void> abort() async {
     if (_finished) return;
-    await output?.close();
-    output = null;
-    if (await file.exists()) await file.delete();
+    try {
+      await output?.close();
+    } finally {
+      output = null;
+      if (await file.exists()) await file.delete();
+    }
   }
 }
 
