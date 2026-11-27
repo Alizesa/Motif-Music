@@ -19,7 +19,8 @@ R"LXJS(
   let result;
   const active = new Map();
   let issued = 0;
-  let requests = 0;
+  let initRequests = 0;
+  const maxInFlight = 64; // Mirrored by the untrusted-frame check in LxScriptExchange.
 
   function bufferFrom(value, encoding = 'utf8') {
     if (value?.type === 'Buffer' && Array.isArray(value.data)) value = value.data;
@@ -128,7 +129,7 @@ R"LXJS(
       return Promise.resolve();
     },
     request(url, options, callback) {
-      if (++requests > 12) throw new RangeError('Request limit');
+      if (phase === 'init' && ++initRequests > 12) throw new RangeError('Initialization request limit');
       if (typeof url !== 'string' || url.length > 2048 ||
           !options || typeof options !== 'object' || typeof callback !== 'function') {
         throw new TypeError('Invalid request');
@@ -148,7 +149,8 @@ R"LXJS(
     if (typeof callback !== 'function' || timers.size >= 32 || ++timerId > 128) {
       throw new RangeError('Timer limit');
     }
-    timers.set(timerId, { at: now() + Math.min(8000, Math.max(0, Number(delay) || 0)), callback, args });
+    const ms = Math.max(0, Number(delay) || 0);
+    timers.set(timerId, { at: now() + (phase === 'play' ? ms : Math.min(8000, ms)), callback, args });
     return timerId;
   }
   const ignore = () => {};
@@ -221,6 +223,10 @@ R"LXJS(
       // Settle queued startup requests through the denial callback below.
       // They remain ineligible for network access after switching to play.
       timers.clear();
+      phase = 'dispatch';
+      return 'S'; // Arm the native musicUrl deadline before entering user code.
+    }
+    if (phase === 'dispatch') {
       phase = 'play';
       // Only fixed categories cross the process boundary, never the script's text.
       const failed = error => {
@@ -245,9 +251,9 @@ R"LXJS(
       return 'T';
     }
     // Independent requests can overlap, but never invent a candidate for
-    // a script that is still awaiting the preceding one. The host enforces
-    // both the two-slot ceiling and the shared outbound budget independently.
-    while (active.size < 2 && queued.length) {
+    // a script that is still awaiting the preceding one. Slots are reusable;
+    // the IPC window is not a lifetime allowance for this song.
+    while (active.size < maxInFlight && queued.length) {
       const entry = queued.shift();
       if (!entry.active) continue;
       if (!entry.allowed) {

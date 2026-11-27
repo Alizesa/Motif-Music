@@ -15,6 +15,8 @@ import '../qq/qq_track.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_native_worker.dart';
 import 'lx_audio_media.dart';
+import 'lx_audio_check.dart';
+import 'lx_ordered_source.dart';
 import 'lx_download.dart';
 import 'lx_network.dart';
 import 'lx_request_error.dart';
@@ -44,6 +46,7 @@ final class LxSourceManager extends ChangeNotifier {
     LxFetch? fetch,
     this._open,
     this._download,
+    this._mediaOpen,
     this._publicDetail,
     LxPlatformCatalog? catalog,
   }) : _catalog = catalog ?? LxPlatformCatalog(),
@@ -56,6 +59,7 @@ final class LxSourceManager extends ChangeNotifier {
   final LxFetch _fetch;
   final LxOpen? _open;
   final LxDownload? _download;
+  final LxMediaOpen? _mediaOpen;
   final LxPublicDetail? _publicDetail;
   final LxPlatformCatalog _catalog;
   final _closing = PcmCancellation();
@@ -319,6 +323,7 @@ final class LxSourceManager extends ChangeNotifier {
         ),
         _open,
         _download,
+        _mediaOpen,
       ),
     ),
   );
@@ -337,34 +342,16 @@ final class LxSourceManager extends ChangeNotifier {
   }
 }
 
-Future<ControlledAudioInput> _openAudio(
-  Uri uri,
-  PcmCancellation owner,
-  PcmCancellation request,
-  DiagnosticTrace? trace,
-) => openLxAudio(LxMediaTransport(uri, owner, trace: trace), request);
-
-Future<String> _downloadAudio(
-  Uri uri,
-  PcmCancellation work,
-  DownloadWrite write,
-  void Function(int) onTotal,
-  DiagnosticTrace? trace,
-) => downloadLxAudio(
-  LxMediaTransport.download(uri, work, trace: trace),
-  work,
-  write,
-  onTotal,
-);
-
 final class _SourceChangeError implements Exception {
   const _SourceChangeError(this.message);
   final String message;
 }
 
-final class _ManagedLxSource
-    implements CancellablePlaybackSource, TrackDownloadSource {
-  _ManagedLxSource(this.address, this.open, this.download);
+final class _ManagedLxSource implements OrderedLxSource {
+  _ManagedLxSource(this.address, this.open, this.download, this.mediaOpen);
+  final LxMediaOpen? mediaOpen;
+  @override
+  bool supports(LxPlatform p, OnlineQuality q) => source.supports(p, q);
   final LxAddressResolver address;
   LxStoredSource get source => address.source;
   final LxOpen? open;
@@ -386,6 +373,7 @@ final class _ManagedLxSource
     required DownloadWrite write,
     required void Function(int) onTotal,
     DiagnosticTrace? trace,
+    LxPlatform? onlyPlatform,
   }) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
@@ -394,10 +382,16 @@ final class _ManagedLxSource
     final release = _lifetime.listen(work.cancel);
     final detach = cancellation.listen(work.cancel);
     try {
-      final Uri uri;
+      final ({Uri uri, int? durationMs}) target;
       try {
         // The worker observes cancellation and reaps its process before returning.
-        uri = await address.resolve(track, quality, work, trace);
+        target = await address.resolve(
+          track,
+          quality,
+          work,
+          trace,
+          onlyPlatform: onlyPlatform,
+        );
       } on OnlineException catch (error) {
         if (trace?.active == true) {
           trace!.record(
@@ -406,6 +400,7 @@ final class _ManagedLxSource
           );
         }
         if (error is LxRequestException ||
+            error is LxAudioCheckFailure ||
             (error.kind != OnlineErrorKind.unavailable &&
                 error.kind != OnlineErrorKind.operationRejected &&
                 error.kind != OnlineErrorKind.scriptFailed)) {
@@ -415,9 +410,22 @@ final class _ManagedLxSource
       }
       trace?.record(DiagnosticEvent.sourceReady);
       final override = download;
-      final format = await (override == null
-          ? _downloadAudio(uri, work, write, onTotal, trace)
-          : override(uri, work, write, onTotal));
+      final format = await (override == null || onlyPlatform != null
+          ? downloadLxAudio(
+              LxMediaTransport.download(
+                target.uri,
+                work,
+                open: mediaOpen,
+                trace: trace,
+              ),
+              work,
+              write,
+              onTotal,
+              check: onlyPlatform == null
+                  ? null
+                  : LxAudioCheck(target.durationMs, downloadQuality: quality),
+            )
+          : override(target.uri, work, write, onTotal));
       trace?.record(DiagnosticEvent.lxMediaReady, {
         DiagnosticField.medium: switch (format) {
           'mp3' => DiagnosticMedium.mp3,
@@ -430,6 +438,9 @@ final class _ManagedLxSource
     } on PcmCancelled {
       if (cancellation.cancelled) rethrow;
       throw const OnlineException(OnlineErrorKind.closed);
+    } on LxAudioCheckFailure catch (error) {
+      trace?.record(DiagnosticEvent.lxMediaFailure, diagnosticFailure(error));
+      rethrow;
     } on FixtureMediaException catch (error) {
       trace?.record(DiagnosticEvent.lxMediaFailure, {
         DiagnosticField.reason: error.kind,
@@ -437,7 +448,10 @@ final class _ManagedLxSource
       throw OnlineException(switch (error.kind) {
         FixtureMediaFailure.format => OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.denied => OnlineErrorKind.rejected,
-        FixtureMediaFailure.range => OnlineErrorKind.malformedResponse,
+        FixtureMediaFailure.range =>
+          onlyPlatform == null
+              ? OnlineErrorKind.malformedResponse
+              : OnlineErrorKind.unsupportedFormat,
         FixtureMediaFailure.transport ||
         FixtureMediaFailure.truncated => OnlineErrorKind.transport,
       });
@@ -458,6 +472,7 @@ final class _ManagedLxSource
     OnlineQuality quality,
     PcmCancellation cancellation, {
     DiagnosticTrace? trace,
+    LxPlatform? onlyPlatform,
   }) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
@@ -470,12 +485,29 @@ final class _ManagedLxSource
     var handedOff = false;
     try {
       work.check();
-      final uri = await address.resolve(track, quality, work, trace);
+      final target = await address.resolve(
+        track,
+        quality,
+        work,
+        trace,
+        onlyPlatform: onlyPlatform,
+      );
       final override = open;
       final input = await work.until(
-        override == null
-            ? _openAudio(uri, owner, work, trace)
-            : override(uri, owner, work),
+        override == null || onlyPlatform != null
+            ? openLxAudio(
+                LxMediaTransport(
+                  target.uri,
+                  owner,
+                  open: mediaOpen,
+                  trace: trace,
+                ),
+                work,
+                check: onlyPlatform == null
+                    ? null
+                    : LxAudioCheck(target.durationMs),
+              )
+            : override(target.uri, owner, work),
         discard: (late) => late.close(),
       );
       final ControlledAudioInput owned;
@@ -504,6 +536,9 @@ final class _ManagedLxSource
         throw const OnlineException(OnlineErrorKind.closed);
       }
       throw const OnlineException(OnlineErrorKind.transport);
+    } on LxAudioCheckFailure catch (error) {
+      trace?.record(DiagnosticEvent.lxMediaFailure, diagnosticFailure(error));
+      rethrow;
     } on FixtureMediaException catch (error) {
       trace?.record(DiagnosticEvent.lxMediaFailure, {
         DiagnosticField.reason: error.kind,
@@ -513,7 +548,10 @@ final class _ManagedLxSource
         FixtureMediaFailure.transport ||
         FixtureMediaFailure.truncated => OnlineErrorKind.transport,
         FixtureMediaFailure.denied => OnlineErrorKind.rejected,
-        _ => OnlineErrorKind.malformedResponse,
+        FixtureMediaFailure.range =>
+          onlyPlatform == null
+              ? OnlineErrorKind.malformedResponse
+              : OnlineErrorKind.unsupportedFormat,
       });
     } on IOException {
       throw const OnlineException(OnlineErrorKind.transport);

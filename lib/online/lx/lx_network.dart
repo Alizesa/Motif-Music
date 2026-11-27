@@ -14,7 +14,9 @@ import 'lx_request_error.dart';
 
 export 'lx_http_connection.dart' show isPublicLxAddress;
 
-const _transportBudget = lxWireTimeout;
+// LX Mobile userApi/request.js (not the generic music SDK fetch).
+const _apiDefaultTimeout = Duration(seconds: 13);
+const _apiMaxTimeout = Duration(seconds: 60);
 const _apiBodyLimit = 48 * 1024;
 
 String? lxHost(String value) {
@@ -245,11 +247,9 @@ final class LxApiRequest {
     final wait = options['timeout'];
     final timeout = wait is num && wait.isFinite && wait > 0
         ? Duration(
-            milliseconds: wait
-                .clamp(1, _transportBudget.inMilliseconds)
-                .round(),
+            milliseconds: wait.clamp(1, _apiMaxTimeout.inMilliseconds).round(),
           )
-        : _transportBudget;
+        : _apiDefaultTimeout;
     return LxApiRequest._(
       uri,
       method,
@@ -266,8 +266,8 @@ final class LxApiRequest {
 
 /// Runs one host-checked public HTTPS exchange with a total deadline.
 final class LxHttpsTransport {
-  const LxHttpsTransport({LxWireOpen? open}) : _open = open ?? openLxHttps;
-  final LxWireOpen _open;
+  const LxHttpsTransport({this._open});
+  final LxWireOpen? _open;
 
   Future<Map<String, Object?>> api(
     LxApiRequest request,
@@ -283,7 +283,17 @@ final class LxHttpsTransport {
       var headers = request.headers;
       var body = request.body;
       for (var redirects = 0; ; redirects++) {
-        reply = await _open(uri, method, headers, body, scope);
+        final open = _open;
+        reply = open == null
+            ? await openLxHttps(
+                uri,
+                method,
+                headers,
+                body,
+                scope,
+                timeout: request.timeout,
+              )
+            : await open(uri, method, headers, body, scope);
         if (!request.followRedirects ||
             !const {301, 302, 303, 307, 308}.contains(reply.status)) {
           break;

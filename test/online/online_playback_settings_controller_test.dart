@@ -8,6 +8,44 @@ import 'package:motif/settings/online_playback_settings_controller.dart';
 import 'playback_fakes.dart';
 
 void main() {
+  test('old single-source preferences never enroll other scripts; an ordered list survives restart', () {
+    final legacy = OnlinePlaybackPreferences.fromJson({
+      'version': 1,
+      'quality': 'high',
+      'preferredSourceId': 'A',
+      'fallbackSourceId': 'B',
+    });
+    expect(legacy.scriptOrder, isEmpty);
+    expect(legacy.preferredSourceId, 'A');
+    expect(legacy.fallbackSourceId, 'B');
+    final list = ['B', 'A', 'B'];
+    final selected = legacy.copyWith(scriptOrder: list);
+    list.clear();
+    final again = OnlinePlaybackPreferences.fromJson(selected.toJson());
+    expect(again.scriptOrder, ['B', 'A']);
+    expect(again.quality, OnlineQuality.high);
+    expect(
+      OnlinePlaybackPreferences.fromJson(
+        again.copyWith(scriptOrder: []).toJson(),
+      ).scriptOrder,
+      isEmpty,
+    );
+    for (final bad in [
+      null,
+      [''],
+      [42],
+      List.filled(13, 'A'),
+    ]) {
+      expect(
+        () => OnlinePlaybackPreferences.fromJson({
+          ...again.toJson(),
+          'scriptOrder': bad,
+        }),
+        throwsFormatException,
+      );
+    }
+  });
+
   test('failed preference loading can be retried', () async {
     final store = MemoryPlaybackPreferencesStore()
       ..loadError = StateError('read failed');

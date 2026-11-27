@@ -3,10 +3,11 @@ import 'dart:typed_data';
 import '../../audio/controlled_encoded.dart';
 import '../../audio/controlled_pcm.dart';
 import 'fixture/lx_fixture_wave.dart';
+import 'lx_audio_check.dart';
 import '../domain/online_error.dart';
 
 const _maximumMediaBytes = 512 * 1024 * 1024;
-const _maximumMetadata = 16 * 1024 * 1024;
+const lxMaximumAudioMetadata = 16 * 1024 * 1024;
 const _formatError = FixtureMediaException(FixtureMediaFailure.format);
 const _rangeError = FixtureMediaException(FixtureMediaFailure.range);
 
@@ -15,6 +16,7 @@ Future<ControlledAudioInput> openLxAudio(
   FixtureRangeTransport transport,
   PcmCancellation cancellation, {
   bool sequential = false,
+  LxAudioCheck? check,
 }) async {
   final first = await cancellation.until(
     transport.open(0, null, cancellation),
@@ -24,6 +26,12 @@ Future<ControlledAudioInput> openLxAudio(
     if (first.status == 429) {
       throw const OnlineException(OnlineErrorKind.rateLimited);
     }
+    if (check != null && const {404, 410}.contains(first.status)) {
+      throw const OnlineException(OnlineErrorKind.unavailable);
+    }
+    if (check != null && first.status >= 500 && first.status < 600) {
+      throw const OnlineException(OnlineErrorKind.transport);
+    }
     if (!const {200, 206}.contains(first.status)) {
       throw const OnlineException(OnlineErrorKind.operationRejected);
     }
@@ -31,7 +39,7 @@ Future<ControlledAudioInput> openLxAudio(
     final probe = _Probe(first.body, cancellation);
     final magic = await probe.read(4);
     if (_text(magic) == 'RIFF') {
-      return await FixtureWave.openManaged(
+      final wave = await FixtureWave.openManaged(
         _FirstResponse(
           transport,
           FixtureRangeResponse(
@@ -43,6 +51,18 @@ Future<ControlledAudioInput> openLxAudio(
         cancellation,
         sequential: sequential,
       );
+      try {
+        check?.verify(
+          'wav',
+          wave.frames * 1000 / wave.sampleRate,
+          depth: 16,
+          rate: wave.sampleRate,
+        );
+        return wave;
+      } catch (_) {
+        wave.close();
+        rethrow;
+      }
     }
     final ControlledAudioFormat format;
     final Uint8List header;
@@ -77,11 +97,17 @@ Future<ControlledAudioInput> openLxAudio(
           throw _formatError;
         }
         await probe.skip(_size24(block, 1));
-        if (probe.offset > _maximumMetadata) throw _formatError;
+        if (probe.offset > lxMaximumAudioMetadata) throw _formatError;
       }
       dataOffset = probe.offset;
       audio = await probe.read(4);
       if (audio[0] != 255 || (audio[1] & 0xfe) != 0xf8) throw _formatError;
+      check?.verify(
+        'flac',
+        (packed & 0xfffffffff) * 1000 / rate,
+        depth: bits,
+        rate: rate,
+      );
       // Drop optional tags, artwork and reference metadata. The decoder only
       // needs STREAMINFO and the audio frames, all read from this one resource.
       header = Uint8List.fromList([...magic, 0x80, 0, 0, 34, ...info]);
@@ -98,7 +124,7 @@ Future<ControlledAudioInput> openLxAudio(
         final size = rest
             .skip(2)
             .fold<int>(0, (size, byte) => (size << 7) | byte);
-        if (size > _maximumMetadata) throw _formatError;
+        if (size > lxMaximumAudioMetadata) throw _formatError;
         await probe.skip(
           size + (magic[3] == 4 && rest[1] & 0x10 != 0 ? 10 : 0),
         );
@@ -111,7 +137,17 @@ Future<ControlledAudioInput> openLxAudio(
       if (next.version != firstFrame.version || next.rate != firstFrame.rate) {
         throw _formatError;
       }
-      audio = Uint8List.fromList([...frame, ...following]);
+      final prefix = Uint8List.fromList([...frame, ...following]);
+      audio = check == null
+          ? prefix
+          : await _checkMp3(
+              check,
+              probe,
+              prefix,
+              firstFrame,
+              next,
+              envelope.size - dataOffset,
+            );
       header = Uint8List(0);
     }
     if (dataOffset + audio.length >= envelope.size) throw _formatError;
@@ -137,8 +173,8 @@ int _size24(List<int> bytes, int offset) =>
     (bytes[offset] << 16) | (bytes[offset + 1] << 8) | bytes[offset + 2];
 
 final class _Mp3Frame {
-  const _Mp3Frame(this.version, this.rate, this.size);
-  final int version, rate, size;
+  const _Mp3Frame(this.version, this.rate, this.size, this.kbps);
+  final int version, rate, size, kbps;
   factory _Mp3Frame.parse(List<int> bytes) {
     if (bytes.length != 4 ||
         bytes[0] != 255 ||
@@ -197,8 +233,79 @@ final class _Mp3Frame {
     final size =
         (version == 3 ? 144000 : 72000) * kbps ~/ rate + ((bytes[2] >> 1) & 1);
     if (size < 24 || size > 2048) throw _formatError;
-    return _Mp3Frame(version, rate, size);
+    return _Mp3Frame(version, rate, size, kbps);
   }
+}
+
+/// Inspect consecutive frames of the same representation. Xing/Info or VBRI
+/// supplies the sample count for VBR. Without a count, only use a bounded CBR
+/// estimate when the sampled frame rates agree; do not infer duration from QQ.
+Future<Uint8List> _checkMp3(
+  LxAudioCheck check,
+  _Probe probe,
+  Uint8List prefix,
+  _Mp3Frame first,
+  _Mp3Frame next,
+  int audioBytes,
+) async {
+  final data = ByteData.sublistView(prefix, 0, first.size);
+  final mono = prefix[3] >> 6 == 3;
+  final side = first.version == 3 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+  int? frames;
+  int? declaredBytes;
+  for (final at in {4 + side, if (prefix[1] & 1 == 0) 6 + side}) {
+    if (at + 12 > data.lengthInBytes ||
+        !const {0x58696e67, 0x496e666f}.contains(data.getUint32(at))) {
+      continue;
+    }
+    final flags = data.getUint32(at + 4);
+    frames = flags & 1 == 0 ? 0 : data.getUint32(at + 8);
+    if (flags & 3 == 3 && at + 16 <= data.lengthInBytes) {
+      declaredBytes = data.getUint32(at + 12);
+    }
+    break;
+  }
+  if (frames == null && first.size >= 54 && data.getUint32(36) == 0x56425249) {
+    frames = data.getUint32(50);
+    declaredBytes = data.getUint32(46);
+  }
+  if ((frames != null && frames < 4) ||
+      (declaredBytes != null &&
+          (declaredBytes <= 0 || declaredBytes > audioBytes))) {
+    throw _formatError;
+  }
+  final parts = BytesBuilder()..add(prefix);
+  var constant = first.kbps == next.kbps;
+  var sampled = 2;
+  for (var n = 2; n < 8 && parts.length + next.size <= audioBytes; n++) {
+    final bytes = await probe.read(next.size);
+    next = _Mp3Frame.parse(bytes.sublist(bytes.length - 4));
+    if (next.rate != first.rate || next.version != first.version) {
+      throw _formatError;
+    }
+    constant = constant && next.kbps == first.kbps;
+    parts.add(bytes);
+    sampled++;
+  }
+  if (sampled < 4 || parts.length + next.size - 4 > audioBytes) {
+    throw _formatError;
+  }
+  if (frames == null && !constant) {
+    throw const LxAudioCheckFailure('无法核实变码率音频时长。');
+  }
+  final ms = frames == null
+      ? audioBytes * 8 / first.kbps
+      : frames * (first.version == 3 ? 1152 : 576) * 1000 / first.rate;
+  final bps = frames == null
+      ? first.kbps * 1000.0
+      : (declaredBytes ?? audioBytes) * 8000 / ms;
+  // An advertised VBR frame count cannot describe more audio than the
+  // payload could encode even at the lowest supported MPEG bitrate.
+  if (frames != null && bps < (first.version == 3 ? 32000 : 8000) * 0.98) {
+    throw _formatError;
+  }
+  check.verify('mp3', ms, bitRate: bps);
+  return parts.takeBytes();
 }
 
 ({int size, String? tag, bool ranges}) _envelope(
@@ -421,7 +528,7 @@ final class _Probe {
   }
 
   Future<void> skip(int count) async {
-    if (count < 0 || count > _maximumMetadata) throw _formatError;
+    if (count < 0 || count > lxMaximumAudioMetadata) throw _formatError;
     for (var remaining = count; remaining > 0;) {
       final next = remaining.clamp(1, 32 * 1024);
       await read(next);

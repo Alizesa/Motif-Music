@@ -132,6 +132,7 @@ class _MotifHomePageState extends State<MotifHomePage>
     _downloads = DownloadController(
       sources: _sources,
       destination: const PlatformDownloadDestination(),
+      currentScriptOrder: () => _settings.value.scriptOrder,
       directoryStore: FileDownloadDirectoryStore(() async {
         final support = await getApplicationSupportDirectory();
         return File.fromUri(
@@ -358,12 +359,14 @@ class _MotifHomePageState extends State<MotifHomePage>
 
   Future<void> _download(QqTrack track) async {
     await _sources.loadManaged?.call();
+    await _settings.initialize();
     if (!mounted) return;
     final started = await showTrackDownloadSheet(
       context,
       controller: _downloads,
       track: track,
       preferredSourceId: _settings.value.preferredSourceId,
+      scriptOrder: _settings.value.scriptOrder,
       quality: _settings.value.quality,
     );
     if (started && mounted) await _openDownloads();

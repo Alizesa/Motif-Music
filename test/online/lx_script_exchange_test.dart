@@ -24,7 +24,7 @@ Future<void> _jobs() => Future<void>.delayed(Duration.zero);
 
 void main() {
   test(
-    'two slots, completion order, one-use IDs, no ID in HTTP options',
+    'concurrent slots, completion order, one-use IDs, no ID in HTTP options',
     () async {
       final gates = <Completer<Map<String, Object?>>>[];
       final e = LxScriptExchange(PcmCancellation(), (m, c) {
@@ -36,7 +36,7 @@ void main() {
       addTearDown(e.close);
       expect(await _reply(e, _q(1)), _ack);
       expect(await _reply(e, _q(2)), _ack);
-      await expectLater(_reply(e, _q(3)), _invalid);
+      expect(await _reply(e, _q(3)), _ack);
       expect(await _reply(e, 'P'), _ack);
       gates[1].complete({
         'response': {'body': 'second'},
@@ -50,7 +50,6 @@ void main() {
         'id': 2,
         'response': {'body': 'second'},
       });
-      expect(await _reply(e, _q(3)), _ack);
       expect(await _reply(e, 'P'), {
         'id': 1,
         'response': {'body': 'first'},
@@ -82,7 +81,7 @@ void main() {
       expect(scopes[0].cancelled, isTrue);
       expect(scopes[1].cancelled, isFalse);
       expect(retired, isFalse);
-      await expectLater(_reply(e, _q(3)), _invalid);
+      await expectLater(_reply(e, 'X1'), _invalid);
       pending[0].complete({
         'response': {'body': 'stale'},
       });
@@ -107,6 +106,21 @@ void main() {
       await expectLater(_reply(e, _q(4)), _invalid);
     },
   );
+
+  test('IPC window bounds live frames, not lifetime IDs', () async {
+    final e = LxScriptExchange(
+      PcmCancellation(),
+      (_, c) => c.until(Completer<Map<String, Object?>>().future),
+    );
+    addTearDown(e.close);
+    for (var id = 1; id <= 64; id++) {
+      expect(await _reply(e, _q(id)), _ack);
+    }
+    await expectLater(_reply(e, _q(65)), _invalid);
+    expect(await _reply(e, 'X42'), _ack);
+    expect(await _reply(e, _q(65)), _ack);
+    await expectLater(_reply(e, _q(66)), _invalid);
+  });
 
   test('owner cancellation aborts both pending handlers', () async {
     final owner = PcmCancellation();
@@ -149,7 +163,7 @@ void main() {
   );
 
   test(
-    'host enforces IDs, response size, candidate count and poll ceiling',
+    'host enforces IDs, response size, large cancel IDs and poll ceiling',
     () async {
       final e = LxScriptExchange(
         PcmCancellation(),
@@ -168,11 +182,12 @@ void main() {
       }
       await _jobs();
       expect(await _reply(e, 'P'), {'id': 1, 'error': 'denied'});
-      for (var n = 2; n <= 12; n++) {
+      for (var n = 2; n <= 101; n++) {
         await _reply(e, _q(n));
         await _reply(e, 'X$n');
       }
-      await expectLater(_reply(e, _q(13)), _invalid);
+      await expectLater(_reply(e, 'X101'), _invalid);
+      await expectLater(_reply(e, 'X0102'), _invalid);
       final polls = LxScriptExchange(
         PcmCancellation(),
         (_, c) => c.until(Completer<Map<String, Object?>>().future),

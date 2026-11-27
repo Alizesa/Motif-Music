@@ -7,6 +7,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../online/domain/music_source_registry.dart';
 import '../../online/lx/lx_native_worker.dart';
+import '../../online/lx/lx_ordered_source.dart';
 import '../../online/lx/lx_music_platform.dart';
 import '../../online/lx/lx_source_manager.dart';
 import '../../online/lx/lx_source_store.dart';
@@ -205,6 +206,80 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
     ];
   }
 
+  List<Widget> _orderEditor() {
+    final settings = widget.settings;
+    final available = {
+      for (final s in widget.sources.orderableScripts) s.id: s.name,
+    };
+    final saved = settings.value.scriptOrder;
+    // Keep temporarily disabled installed scripts in their positions, but drop
+    // removed IDs on edit so stale records never exhaust the preference limit.
+    final installed =
+        widget.managed?.sources.map((s) => s.id).toSet() ??
+        available.keys.toSet();
+    final order = saved.where(installed.contains).toList();
+    final names = {
+      for (final s in widget.managed?.sources ?? const <LxStoredSource>[])
+        s.id: s.name,
+      ...available,
+    };
+    void save(List<String> next) =>
+        unawaited(settings.save(settings.value.copyWith(scriptOrder: next)));
+    void move(int a, int b) {
+      final next = [...order];
+      next.insert(b, next.removeAt(a));
+      save(next);
+    }
+
+    if (available.isEmpty && order.isEmpty) return [];
+    return [
+      const SizedBox(height: 20),
+      Text('换源顺序', style: Theme.of(context).textTheme.titleLarge),
+      const Text('只尝试勾选的脚本，按从上到下的顺序。音频校验通过即停止；停用的脚本会跳过。'),
+      for (final (i, id) in [
+        ...order,
+        ...available.keys.where((id) => !order.contains(id)),
+      ].indexed)
+        Row(
+          children: [
+            Expanded(
+              child: CheckboxListTile(
+                key: ValueKey('order-$id'),
+                title: Text(names[id] ?? '音源'),
+                subtitle: !available.containsKey(id) ? const Text('已停用') : null,
+                value: order.contains(id),
+                onChanged: settings.isSaving
+                    ? null
+                    : (on) => save(
+                        on == true
+                            ? [...order, id]
+                            : order.where((v) => v != id).toList(),
+                      ),
+              ),
+            ),
+            if (order.contains(id)) ...[
+              IconButton(
+                key: ValueKey('order-up-$id'),
+                tooltip: '上移',
+                onPressed: settings.isSaving || i == 0
+                    ? null
+                    : () => move(i, i - 1),
+                icon: const Icon(Icons.arrow_upward),
+              ),
+              IconButton(
+                key: ValueKey('order-down-$id'),
+                tooltip: '下移',
+                onPressed: settings.isSaving || i == order.length - 1
+                    ? null
+                    : () => move(i, i + 1),
+                icon: const Icon(Icons.arrow_downward),
+              ),
+            ],
+          ],
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('音源管理')),
@@ -249,6 +324,23 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
                       },
                       child: Column(
                         children: [
+                          if (widget.sources.orderableScripts.isNotEmpty ||
+                              primary == lxOrderedSourceId)
+                            Card(
+                              child: RadioListTile<String>(
+                                key: const ValueKey('preferred-ordered'),
+                                value: lxOrderedSourceId,
+                                title: const Text('按顺序换源'),
+                                subtitle: const Text('使用下方配置的脚本顺序'),
+                                enabled:
+                                    !settings.isSaving &&
+                                    widget.sources
+                                        .orderedQualities(
+                                          settings.value.scriptOrder,
+                                        )
+                                        .isNotEmpty,
+                              ),
+                            ),
                           for (final source in widget.sources.sources)
                             Card(
                               child: RadioListTile<String>(
@@ -262,46 +354,52 @@ class _MusicSourceSettingsPageState extends State<MusicSourceSettingsPage> {
                       ),
                     ),
                     const SizedBox(height: 24),
-                    Text('备用来源', style: Theme.of(context).textTheme.titleLarge),
-                    const SizedBox(height: 8),
-                    const Text('优先来源无法提供歌曲或所选音质时，尝试备用来源。'),
-                    const SizedBox(height: 12),
-                    RadioGroup<String>(
-                      groupValue: activeFallback,
-                      onChanged: (id) {
-                        if (id != null) {
-                          unawaited(
-                            settings.save(
-                              settings.value.copyWith(
-                                fallbackSourceId: id.isEmpty ? null : id,
-                                clearFallback: id.isEmpty,
-                              ),
-                            ),
-                          );
-                        }
-                      },
-                      child: Column(
-                        children: [
-                          Card(
-                            child: RadioListTile<String>(
-                              title: const Text('不使用备用来源'),
-                              value: '',
-                              enabled: !settings.isSaving,
-                            ),
-                          ),
-                          for (final source in widget.sources.sources)
-                            if (source.id != primary)
-                              Card(
-                                child: RadioListTile<String>(
-                                  key: ValueKey('fallback-${source.id}'),
-                                  title: Text(source.name),
-                                  value: source.id,
-                                  enabled: !settings.isSaving,
+                    if (primary != lxOrderedSourceId) ...[
+                      Text(
+                        '备用来源',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      const Text('优先来源无法提供歌曲或所选音质时，尝试备用来源。'),
+                      const SizedBox(height: 12),
+                      RadioGroup<String>(
+                        groupValue: activeFallback,
+                        onChanged: (id) {
+                          if (id != null) {
+                            unawaited(
+                              settings.save(
+                                settings.value.copyWith(
+                                  fallbackSourceId: id.isEmpty ? null : id,
+                                  clearFallback: id.isEmpty,
                                 ),
                               ),
-                        ],
+                            );
+                          }
+                        },
+                        child: Column(
+                          children: [
+                            Card(
+                              child: RadioListTile<String>(
+                                title: const Text('不使用备用来源'),
+                                value: '',
+                                enabled: !settings.isSaving,
+                              ),
+                            ),
+                            for (final source in widget.sources.sources)
+                              if (source.id != primary)
+                                Card(
+                                  child: RadioListTile<String>(
+                                    key: ValueKey('fallback-${source.id}'),
+                                    title: Text(source.name),
+                                    value: source.id,
+                                    enabled: !settings.isSaving,
+                                  ),
+                                ),
+                          ],
+                        ),
                       ),
-                    ),
+                    ],
+                    ..._orderEditor(),
                     if (widget.managed == null &&
                         widget.sources.sources.length == 1) ...[
                       const SizedBox(height: 20),

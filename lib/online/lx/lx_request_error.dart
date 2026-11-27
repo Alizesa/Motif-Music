@@ -7,7 +7,6 @@ enum LxRequestFailure {
   headers,
   method,
   body,
-  budget,
   dns,
   connect,
   tls,
@@ -32,8 +31,7 @@ final class LxRequestException extends OnlineException {
                   reason == LxRequestFailure.method ||
                   reason == LxRequestFailure.body
             ? OnlineErrorKind.unsupportedRequest
-            : reason == LxRequestFailure.budget ||
-                  reason == LxRequestFailure.scriptCancelled
+            : reason == LxRequestFailure.scriptCancelled
             ? OnlineErrorKind.operationRejected
             : OnlineErrorKind.rejected,
       );
@@ -48,7 +46,6 @@ final class LxRequestException extends OnlineException {
     LxRequestFailure.headers => '音源使用了当前不支持的请求头，请换一个音源。',
     LxRequestFailure.method => '音源使用了当前不支持的请求方法，请换一个音源。',
     LxRequestFailure.body => '音源使用了当前不支持的请求内容，请换一个音源。',
-    LxRequestFailure.budget => '音源请求次数达到本次上限，已停止继续请求。',
     LxRequestFailure.dns => '音源域名解析失败，请检查网络后重试。',
     LxRequestFailure.connect => '无法连接音源服务器，请稍后重试。',
     LxRequestFailure.tls => '音源 HTTPS 连接或证书验证失败，请稍后重试。',

@@ -1,5 +1,7 @@
 #include "script_runtime.h"
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <thread>
 
@@ -14,16 +16,18 @@ constexpr char kPrelude[] =
     ;
 constexpr char kError[] = R"({"error":"script"})";
 
-// Q has a JSON request id; X cancels exactly one of the 12 allowed ids.
-bool IsCancelCommand(std::string_view message) {
-  return (message.size() == 2 && message[0] == 'X' && message[1] >= '1' && message[1] <= '9') ||
-         (message.size() == 3 && message.starts_with("X1") && message[2] >= '0' && message[2] <= '2');
+bool IsCancelCommand(std::string_view message, int issued) {
+  if (message.size() < 2 || message[0] != 'X' || message[1] < '1' || message[1] > '9') return false;
+  int id = 0;
+  const auto end = message.data() + message.size();
+  const auto [ptr, ec] = std::from_chars(message.data() + 1, end, id);
+  return ec == std::errc{} && ptr == end && id <= issued;
 }
 
 struct ScriptRuntime {
   JSRuntime* runtime = JS_NewRuntime();
   JSContext* context = nullptr;
-  const Clock::time_point deadline = Clock::now() + std::chrono::seconds(kLxScriptTimeoutSeconds);
+  Clock::time_point deadline = Clock::now() + std::chrono::seconds(kLxScriptTimeoutSeconds);
   int jobs = 0;
 
   ScriptRuntime() {
@@ -100,18 +104,26 @@ std::string RunLxScript(std::string_view script, std::string_view parameters,
   std::string response;
   int requests = 0;
   for (int actions = 0; actions < kLxScriptExchangeLimit && !runtime.Expired(); ++actions) {
-    if (!runtime.DrainJobs()) return kError;
+    if (!runtime.DrainJobs()) {
+      if (runtime.Expired()) break;
+      return kError;
+    }
     Value argument{context, response.empty() ? JS_UNDEFINED
         : JS_NewStringLen(context, response.data(), response.size())};
     if (JS_IsException(argument.value)) return kError;
     const Value value{context, JS_Call(context, step.value, JS_UNDEFINED, 1, &argument.value)};
+    if (runtime.Expired()) break;
     const auto message = CopyMessage(context, value.value);
     response.clear();
     if (message.empty()) return kError;
     if (message[0] == 'D') return message.substr(1);
-    if (message == "W") {
+    if (message == "S") {
+      // LX Mobile waits 20s for this action, independent of an HTTP timeout.
+      runtime.deadline = std::min(runtime.deadline, Clock::now() + 20s);
+    } else if (message == "W") {
       std::this_thread::sleep_for(12ms);
-    } else if ((message[0] == 'Q' && ++requests <= 12) || message == "P" || IsCancelCommand(message)) {
+    } else if (message[0] == 'Q' || message == "P" || IsCancelCommand(message, requests)) {
+      if (message[0] == 'Q') ++requests; // bounded by the IPC action limit
       if (message == "P") std::this_thread::sleep_for(15ms);
       response = request(opaque, message);
       if (response.empty() || response.size() > kLxMessageBytes) return kError;

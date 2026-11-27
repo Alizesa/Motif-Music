@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../downloads/download_controller.dart';
 import '../../online/domain/download_source.dart';
+import '../../online/lx/lx_ordered_source.dart';
 import '../../online/domain/playback_source.dart';
 import '../../online/qq/qq_track.dart';
 
@@ -141,6 +142,7 @@ Future<bool> showTrackDownloadSheet(
   required DownloadController controller,
   required QqTrack track,
   required String preferredSourceId,
+  List<String> scriptOrder = const [],
   required OnlineQuality quality,
 }) async =>
     await showModalBottomSheet<bool>(
@@ -151,6 +153,7 @@ Future<bool> showTrackDownloadSheet(
         controller: controller,
         track: track,
         preferredSourceId: preferredSourceId,
+        scriptOrder: scriptOrder,
         quality: quality,
       ),
     ) ??
@@ -161,11 +164,13 @@ class _DownloadSheet extends StatefulWidget {
     required this.controller,
     required this.track,
     required this.preferredSourceId,
+    required this.scriptOrder,
     required this.quality,
   });
   final DownloadController controller;
   final QqTrack track;
   final String preferredSourceId;
+  final List<String> scriptOrder;
   final OnlineQuality quality;
   @override
   State<_DownloadSheet> createState() => _DownloadSheetState();
@@ -179,7 +184,9 @@ class _DownloadSheetState extends State<_DownloadSheet> {
     super.initState();
     unawaited(widget.controller.directoryReady);
     final sources = widget.controller.sources.downloadSources;
-    _source = sources.any((source) => source.id == widget.preferredSourceId)
+    _source =
+        widget.preferredSourceId == lxOrderedSourceId ||
+            sources.any((source) => source.id == widget.preferredSourceId)
         ? widget.preferredSourceId
         : sources.firstOrNull?.id;
     _quality = widget.quality;
@@ -192,7 +199,13 @@ class _DownloadSheetState extends State<_DownloadSheet> {
       final controller = widget.controller;
       final sources = controller.sources.downloadSources;
       final source = sources.where((item) => item.id == _source).firstOrNull;
-      final qualities = source == null
+      final ordered = _source == lxOrderedSourceId;
+      final orderedQualities = controller.sources.orderedQualities(
+        widget.scriptOrder,
+      );
+      final qualities = ordered
+          ? OnlineQuality.values.where(orderedQualities.contains).toList()
+          : source == null
           ? <OnlineQuality>[]
           : OnlineQuality.values
                 .where(
@@ -201,7 +214,7 @@ class _DownloadSheetState extends State<_DownloadSheet> {
                       .contains(quality),
                 )
                 .toList();
-      if (!qualities.contains(_quality) && qualities.isNotEmpty) {
+      if (!ordered && !qualities.contains(_quality) && qualities.isNotEmpty) {
         _quality = qualities.first;
       }
       final busy = controller.busy || controller.choosing;
@@ -226,9 +239,14 @@ class _DownloadSheetState extends State<_DownloadSheet> {
               else ...[
                 DropdownButtonFormField<String>(
                   isExpanded: true,
-                  initialValue: source?.id,
+                  initialValue: ordered ? lxOrderedSourceId : source?.id,
                   decoration: const InputDecoration(labelText: '下载音源'),
                   items: [
+                    if (orderedQualities.isNotEmpty || ordered)
+                      const DropdownMenuItem(
+                        value: lxOrderedSourceId,
+                        child: Text('按顺序换源'),
+                      ),
                     for (final item in sources)
                       DropdownMenuItem(
                         value: item.id,
@@ -243,6 +261,8 @@ class _DownloadSheetState extends State<_DownloadSheet> {
                       ? null
                       : (value) => setState(() => _source = value),
                 ),
+                if (ordered && !qualities.contains(_quality))
+                  const Text('换源列表中没有支持当前音质的脚本，请手动选择音质或调整列表。'),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<OnlineQuality>(
                   key: ValueKey('download-quality-$_source-$_quality'),
@@ -277,13 +297,20 @@ class _DownloadSheetState extends State<_DownloadSheet> {
               FilledButton.icon(
                 onPressed:
                     busy ||
-                        source == null ||
-                        qualities.isEmpty ||
+                        (!ordered && source == null) ||
+                        !qualities.contains(_quality) ||
                         controller.directory == null
                     ? null
                     : () {
                         unawaited(
-                          controller.start(widget.track, source.id, _quality),
+                          controller.start(
+                            widget.track,
+                            _source!,
+                            _quality,
+                            scriptOrder: ordered
+                                ? widget.scriptOrder
+                                : const [],
+                          ),
                         );
                         Navigator.of(context).pop(true);
                       },

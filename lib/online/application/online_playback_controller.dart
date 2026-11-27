@@ -196,6 +196,7 @@ class OnlinePlaybackController extends ChangeNotifier {
         preferences.quality,
         preferredSourceId: preferences.preferredSourceId,
         fallbackSourceId: preferences.fallbackSourceId,
+        scriptOrder: preferences.scriptOrder,
         confirm: confirmLocal,
         isCurrent: isCurrent,
         cancellation: intent,

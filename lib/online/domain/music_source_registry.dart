@@ -5,6 +5,8 @@ import 'online_error.dart';
 import 'download_source.dart';
 import 'playback_source.dart';
 import '../qq/qq_track.dart';
+import '../lx/lx_ordered_source.dart';
+import '../lx/lx_music_platform.dart';
 
 class MusicSourceRegistration {
   const MusicSourceRegistration({required this.name, required this.resolver});
@@ -25,7 +27,10 @@ class MusicSourceRegistry {
        ]) {
     if (qq.sourceId != 'qq' ||
         sources.any(
-          (source) => source.id.isEmpty || source.name.trim().isEmpty,
+          (source) =>
+              source.id.isEmpty ||
+              source.id == lxOrderedSourceId ||
+              source.name.trim().isEmpty,
         ) ||
         sources.map((source) => source.id).toSet().length != sources.length) {
       throw ArgumentError('Invalid source registrations');
@@ -41,6 +46,22 @@ class MusicSourceRegistry {
     sources.where((source) => source.resolver is TrackDownloadSource),
   );
 
+  List<MusicSourceRegistration> get orderableScripts => [
+    for (final s in _managed.values)
+      if (s.resolver is OrderedLxSource) s,
+  ];
+
+  List<OrderedLxSource> _ordered(List<String> ids) => [
+    for (final id in ids.toSet())
+      if (_managed[id]?.resolver case final OrderedLxSource script) script,
+  ];
+
+  Set<OnlineQuality> orderedQualities(List<String> ids) => {
+    for (final s in _ordered(ids)) ...s.downloadQualities,
+  };
+  bool _registered(OrderedLxSource s) =>
+      identical(_managed[s.sourceId]?.resolver, s);
+
   Future<String> download(
     String sourceId,
     QqTrack track,
@@ -49,6 +70,54 @@ class MusicSourceRegistry {
     DiagnosticTrace? trace,
     required DownloadWrite write,
     required void Function(int) onTotal,
+    List<String> scriptOrder = const [],
+  }) async {
+    if (sourceId == lxOrderedSourceId) {
+      return tryOrderedLx(
+        scripts: _ordered(scriptOrder),
+        quality: quality,
+        owner: cancellation,
+        registered: _registered,
+        onFallback: (s, p) => _orderedFallback(trace, s.sourceId, quality, p),
+        checkActive: () => _checkActive(null),
+        attempt: (source, platform, work, accept) => _download(
+          source.sourceId,
+          track,
+          quality,
+          cancellation: work,
+          trace: trace,
+          onlyPlatform: platform,
+          write: (bytes) {
+            accept();
+            return write(bytes);
+          },
+          onTotal: (n) {
+            accept();
+            onTotal(n);
+          },
+        ),
+      );
+    }
+    return _download(
+      sourceId,
+      track,
+      quality,
+      cancellation: cancellation,
+      trace: trace,
+      write: write,
+      onTotal: onTotal,
+    );
+  }
+
+  Future<String> _download(
+    String sourceId,
+    QqTrack track,
+    OnlineQuality quality, {
+    required PcmCancellation cancellation,
+    required DownloadWrite write,
+    required void Function(int) onTotal,
+    DiagnosticTrace? trace,
+    LxPlatform? onlyPlatform,
   }) async {
     _checkActive(null);
     cancellation.check();
@@ -63,14 +132,24 @@ class MusicSourceRegistry {
         _sourceFacts(source.id, quality),
       );
     }
-    final extension = await resolver.transfer(
-      track,
-      quality,
-      cancellation: cancellation,
-      write: write,
-      onTotal: onTotal,
-      trace: trace,
-    );
+    final extension = onlyPlatform != null
+        ? await (resolver as OrderedLxSource).transfer(
+            track,
+            quality,
+            cancellation: cancellation,
+            write: write,
+            onTotal: onTotal,
+            trace: trace,
+            onlyPlatform: onlyPlatform,
+          )
+        : await resolver.transfer(
+            track,
+            quality,
+            cancellation: cancellation,
+            write: write,
+            onTotal: onTotal,
+            trace: trace,
+          );
     _checkActive(null);
     cancellation.check();
     if (!sources.any((item) => identical(item, source))) {
@@ -83,11 +162,13 @@ class MusicSourceRegistry {
 
   bool contains(String id) => sources.any((source) => source.id == id);
 
-  String effectivePrimary(String id) => contains(id) ? id : 'qq';
+  String effectivePrimary(String id) =>
+      id == lxOrderedSourceId || contains(id) ? id : 'qq';
 
   void registerManaged(MusicSourceRegistration source) {
     if (_closed ||
         source.id.isEmpty ||
+        source.id == lxOrderedSourceId ||
         source.name.trim().isEmpty ||
         contains(source.id)) {
       source.resolver.close();
@@ -103,6 +184,7 @@ class MusicSourceRegistry {
     OnlineQuality quality, {
     String preferredSourceId = 'qq',
     String? fallbackSourceId,
+    List<String> scriptOrder = const [],
     void Function()? checkActive,
     PcmCancellation? cancellation,
     DiagnosticTrace? trace,
@@ -114,6 +196,25 @@ class MusicSourceRegistry {
         (preferredSourceId != 'qq' || fallbackSourceId != null)) {
       await ensureSources();
       _checkActive(checkActive);
+    }
+    if (preferredSourceId == lxOrderedSourceId) {
+      return tryOrderedLx(
+        scripts: _ordered(scriptOrder),
+        quality: quality,
+        owner: cancellation ?? PcmCancellation(),
+        registered: _registered,
+        onFallback: (s, p) => _orderedFallback(trace, s.sourceId, quality, p),
+        checkActive: () => _checkActive(checkActive),
+        attempt: (s, p, work, _) => _attempt(
+          s.sourceId,
+          track,
+          quality,
+          checkActive,
+          work,
+          trace,
+          onlyPlatform: p,
+        ),
+      );
     }
     final primary = effectivePrimary(preferredSourceId);
     final fallback =
@@ -164,6 +265,20 @@ class MusicSourceRegistry {
     }
   }
 
+  void _orderedFallback(
+    DiagnosticTrace? trace,
+    String id,
+    OnlineQuality quality,
+    LxPlatform platform,
+  ) {
+    if (trace?.active == true) {
+      trace!.record(DiagnosticEvent.sourceFallback, {
+        ..._sourceFacts(id, quality),
+        DiagnosticField.platform: platform,
+      });
+    }
+  }
+
   DiagnosticFacts _sourceFacts(String id, OnlineQuality quality) => {
     DiagnosticField.source: id == 'qq'
         ? DiagnosticSource.qq
@@ -182,8 +297,9 @@ class MusicSourceRegistry {
     OnlineQuality quality,
     void Function()? checkActive,
     PcmCancellation? cancellation,
-    DiagnosticTrace? trace,
-  ) async {
+    DiagnosticTrace? trace, {
+    LxPlatform? onlyPlatform,
+  }) async {
     final facts = trace?.active == true ? _sourceFacts(id, quality) : null;
     if (facts != null) trace!.record(DiagnosticEvent.sourceRequest, facts);
     try {
@@ -194,6 +310,7 @@ class MusicSourceRegistry {
         checkActive,
         cancellation,
         trace,
+        onlyPlatform: onlyPlatform,
       );
       trace?.record(DiagnosticEvent.sourceReady);
       return stream;
@@ -211,8 +328,9 @@ class MusicSourceRegistry {
     OnlineQuality quality,
     void Function()? checkActive,
     PcmCancellation? cancellation,
-    DiagnosticTrace? trace,
-  ) async {
+    DiagnosticTrace? trace, {
+    LxPlatform? onlyPlatform,
+  }) async {
     _checkActive(checkActive);
     cancellation?.check();
     final managed = _managed[id];
@@ -220,7 +338,15 @@ class MusicSourceRegistry {
         managed ?? _builtIn.where((source) => source.id == id).firstOrNull;
     if (source == null) throw const OnlineException(OnlineErrorKind.closed);
     final resolver = source.resolver;
-    final stream = resolver is CancellablePlaybackSource
+    final stream = onlyPlatform != null
+        ? await (resolver as OrderedLxSource).resolveCancellable(
+            track,
+            quality,
+            cancellation!,
+            trace: trace,
+            onlyPlatform: onlyPlatform,
+          )
+        : resolver is CancellablePlaybackSource
         ? await resolver.resolveCancellable(
             track,
             quality,

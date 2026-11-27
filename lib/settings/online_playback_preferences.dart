@@ -5,22 +5,31 @@ class OnlinePlaybackPreferences {
     this.quality = OnlineQuality.standard,
     this.preferredSourceId = 'qq',
     this.fallbackSourceId,
+    this.scriptOrder = const [],
   });
 
   final OnlineQuality quality;
   final String preferredSourceId;
   final String? fallbackSourceId;
+  final List<String> scriptOrder;
 
   Map<String, Object?> toJson() => {
-    'version': 1,
+    'version': 2,
+    'scriptOrder': scriptOrder,
     'quality': quality.name,
     'preferredSourceId': preferredSourceId,
     'fallbackSourceId': fallbackSourceId,
   };
 
   factory OnlinePlaybackPreferences.fromJson(Map<String, Object?> json) {
-    if (json['version'] != 1) {
+    if (json['version'] != 1 && json['version'] != 2) {
       throw const FormatException('Invalid preferences');
+    }
+    final order = json['version'] == 1 ? const [] : json['scriptOrder'];
+    if (order is! List ||
+        order.length > 12 ||
+        order.any((id) => id is! String || id.isEmpty || id.length > 200)) {
+      throw const FormatException('Invalid script order');
     }
     final preferred = json['preferredSourceId'];
     final fallback = json['fallbackSourceId'];
@@ -39,6 +48,7 @@ class OnlinePlaybackPreferences {
     if (qualities.length != 1) throw const FormatException('Invalid quality');
     return OnlinePlaybackPreferences(
       quality: qualities.single,
+      scriptOrder: List.unmodifiable(order.cast<String>().toSet()),
       preferredSourceId: preferred,
       fallbackSourceId: fallback == preferred ? null : fallback as String?,
     );
@@ -49,6 +59,7 @@ class OnlinePlaybackPreferences {
     String? preferredSourceId,
     String? fallbackSourceId,
     bool clearFallback = false,
+    List<String>? scriptOrder,
   }) {
     final primary = preferredSourceId ?? this.preferredSourceId;
     final fallback = clearFallback
@@ -56,6 +67,7 @@ class OnlinePlaybackPreferences {
         : fallbackSourceId ?? this.fallbackSourceId;
     return OnlinePlaybackPreferences(
       quality: quality ?? this.quality,
+      scriptOrder: List.unmodifiable((scriptOrder ?? this.scriptOrder).toSet()),
       preferredSourceId: primary,
       fallbackSourceId: fallback == primary ? null : fallback,
     );

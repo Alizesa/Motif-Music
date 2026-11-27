@@ -6,6 +6,7 @@ import '../domain/download_source.dart';
 import '../domain/online_error.dart';
 import 'fixture/lx_fixture_wave.dart';
 import 'lx_audio_media.dart';
+import 'lx_audio_check.dart';
 
 /// Runs the playback format/envelope checks over a tap of the original body.
 /// Tags and artwork are saved unchanged; decoder-only transformations never
@@ -14,13 +15,24 @@ Future<String> downloadLxAudio(
   FixtureRangeTransport transport,
   PcmCancellation cancellation,
   DownloadWrite write,
-  void Function(int) onTotal,
-) async {
-  final tap = _DownloadTransport(transport, cancellation, write);
+  void Function(int) onTotal, {
+  LxAudioCheck? check,
+}) async {
+  final tap = _DownloadTransport(
+    transport,
+    cancellation,
+    write,
+    holdProbe: check != null,
+  );
   ControlledAudioInput? checked;
   final release = cancellation.listen(() => tap.body?.close());
   try {
-    checked = await openLxAudio(tap, cancellation, sequential: true);
+    checked = await openLxAudio(
+      tap,
+      cancellation,
+      sequential: true,
+      check: check,
+    );
     final extension = checked is ControlledEncodedInput
         ? checked.format.name
         : 'wav';
@@ -30,6 +42,7 @@ Future<String> downloadLxAudio(
     }
     onTotal(total);
     final body = tap.body!;
+    await body.flushProbe();
     while (body.count < total) {
       cancellation.check();
       final part = await cancellation.until(
@@ -56,7 +69,13 @@ Future<String> downloadLxAudio(
 }
 
 final class _DownloadTransport implements FixtureRangeTransport {
-  _DownloadTransport(this.transport, this.cancellation, this.write);
+  _DownloadTransport(
+    this.transport,
+    this.cancellation,
+    this.write, {
+    required this.holdProbe,
+  });
+  final bool holdProbe;
   final FixtureRangeTransport transport;
   final PcmCancellation cancellation;
   final DownloadWrite write;
@@ -86,7 +105,12 @@ final class _DownloadTransport implements FixtureRangeTransport {
     // Keep the raw length to check EOF independently of the format probe.
     final lengths = response.headers['content-length'];
     total = lengths?.length == 1 ? int.tryParse(lengths!.single) ?? 0 : 0;
-    final reader = body = _DownloadBody(response.body, write, cancellation);
+    final reader = body = _DownloadBody(
+      response.body,
+      write,
+      cancellation,
+      holdProbe: holdProbe,
+    );
     return FixtureRangeResponse(
       status: response.status,
       headers: response.headers,
@@ -118,7 +142,37 @@ final class _DownloadHttpException extends OnlineException {
 }
 
 final class _DownloadBody implements ControlledPcmRead {
-  _DownloadBody(this.inner, this.write, this.cancellation);
+  _DownloadBody(
+    this.inner,
+    this.write,
+    this.cancellation, {
+    required bool holdProbe,
+  }) : _prefix = holdProbe ? BytesBuilder(copy: true) : null;
+  BytesBuilder? _prefix;
+
+  Future<void> _save(Uint8List bytes) async {
+    _writing = Future.microtask(() {
+      cancellation.check();
+      return write(bytes);
+    });
+    try {
+      await _writing;
+    } finally {
+      _writing = null;
+    }
+  }
+
+  Future<void> flushProbe() async {
+    final bytes = _prefix?.takeBytes();
+    _prefix = null;
+    if (bytes == null) return;
+    for (var pos = 0; pos < bytes.length; pos += 32768) {
+      await _save(
+        Uint8List.sublistView(bytes, pos, (pos + 32768).clamp(0, bytes.length)),
+      );
+    }
+  }
+
   final ControlledPcmRead inner;
   final DownloadWrite write;
   final PcmCancellation cancellation;
@@ -142,20 +196,23 @@ final class _DownloadBody implements ControlledPcmRead {
       throw const FixtureMediaException(FixtureMediaFailure.range);
     }
     if (bytes.isNotEmpty) {
-      final pending = _writing = Future.microtask(() {
-        cancellation.check();
-        return write(bytes);
-      });
-      try {
-        await pending;
-        count += bytes.length;
-      } finally {
-        _writing = null;
+      if (_prefix case final prefix?) {
+        // ID3/FLAC metadata plus bounded frame lookahead. Never buffer a song.
+        if (prefix.length + bytes.length > lxMaximumAudioMetadata + 32 * 1024) {
+          throw const FixtureMediaException(FixtureMediaFailure.format);
+        }
+        prefix.add(bytes);
+      } else {
+        await _save(bytes);
       }
+      count += bytes.length;
     }
     return bytes;
   }
 
   @override
-  void close() => inner.close();
+  void close() {
+    _prefix = null;
+    inner.close();
+  }
 }

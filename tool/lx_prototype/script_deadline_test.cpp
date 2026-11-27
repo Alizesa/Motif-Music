@@ -35,34 +35,34 @@ std::string Reply(void* opaque, std::string_view message) {
   exchange.invalid = true;
   return {};
 }
-// A fast second request wins a script-authored race. The first is still
-// outstanding and must receive its own cancellation before completion.
+// The fourteenth candidate wins while the other thirteen are still pending.
+// Each loser must receive its own cancellation, including IDs beyond X12.
 bool ParallelContract() {
   int stage = 0;
   auto exchange = [](void* opaque, std::string_view m) -> std::string {
     auto& n = *static_cast<int*>(opaque);
-    if (n < 2 && m.starts_with("Q") && m.find(n ? R"("id":2)" : R"("id":1)") != m.npos) {
+    if (n < 14 && m.starts_with("Q") && m.find("\"id\":" + std::to_string(n + 1) + ",") != m.npos) {
       ++n;
       return R"({"pending":true})";
     }
-    if (n == 2 && m == "P") {
+    if (n == 14 && m == "P") {
       ++n;
-      return R"({"id":2,"response":{"statusCode":200,"headers":{},"body":"https://media.fixture.invalid/fast"}})";
+      return R"({"id":14,"response":{"statusCode":200,"headers":{},"body":"https://media.fixture.invalid/fast"}})";
     }
-    if (n == 3 && m == "X1") { ++n; return R"({"pending":true})"; }
+    if (n >= 15 && n < 28 && m == "X" + std::to_string(n - 14)) { ++n; return R"({"pending":true})"; }
     return {};
   };
   constexpr std::string_view script = R"JS(
     lx.on('request', () => {
       const ask = path => new Promise((resolve,reject) => lx.request(
         'https://api.fixture.invalid/' + path, {}, (err,resp,body) => err ? reject(err) : resolve(body)));
-      return Promise.race([ask('slow'), ask('fast')]);
+      return Promise.race(Array.from({length: 14}, (_, n) => ask(n)));
     });
     lx.send('inited', {sources:{tx:{type:'music',actions:['musicUrl'],qualitys:['128k']}}});
   )JS";
   constexpr std::string_view parameters = R"({"env":"desktop","info":{},"event":{"source":"tx","action":"musicUrl","info":{"type":"128k","musicInfo":{}}}})";
   const auto result = motif::lx_probe::RunLxScript(script, parameters, exchange, &stage);
-  return stage == 4 && result == R"({"url":"https://media.fixture.invalid/fast"})";
+  return stage == 28 && result == R"({"url":"https://media.fixture.invalid/fast"})";
 }
 }  // namespace
 

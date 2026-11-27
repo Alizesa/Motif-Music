@@ -6,9 +6,7 @@ import '../../audio/controlled_pcm.dart';
 
 const lxMessageLimit = 64 * 1024;
 const lxScriptExchangeLimit = 2400;
-const lxScriptCallLimit =
-    12; // script calls, not permissions to send wire requests
-const _inFlightLimit = 2;
+const lxScriptInFlightLimit = 64; // pending frames, not calls per song
 
 typedef LxExchangeHandler = Future<Map<String, Object?>> Function(
   Map<String, Object?> request,
@@ -40,7 +38,7 @@ final class LxScriptExchange {
     }
     switch (message.first) {
       case 81: // Q: start; an immediate acknowledgement is not an HTTP result
-        if (_slots.length >= _inFlightLimit || _issued >= lxScriptCallLimit) {
+        if (_slots.length >= lxScriptInFlightLimit) {
           throw const FormatException('LX broker slots');
         }
         final request = decodeLxMessage(Uint8List.sublistView(message, 1));
@@ -63,7 +61,8 @@ final class LxScriptExchange {
         _release(slot);
         return result;
       case 88: // X<decimal id>: one request, not a cancellation of its peers
-        if (message.length < 2 || message.length > 3) {
+        if (message.length < 2 ||
+            message.length > 1 + lxScriptExchangeLimit.toString().length) {
           throw const FormatException('LX cancel');
         }
         final text = ascii.decode(Uint8List.sublistView(message, 1));

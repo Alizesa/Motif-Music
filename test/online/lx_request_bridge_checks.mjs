@@ -6,8 +6,10 @@ import { setImmediate as drainJobs, setTimeout as delay } from 'node:timers/prom
 const prelude = fs.readFileSync('tool/lx_prototype/script_prelude.inc', 'utf8')
   .replace(/^R"LXJS\(/, '').replace(/\)LXJS"\s*$/, '');
 
-async function run(env, script, exchange, { initOnly = false, source = 'tx', type = '128k' } = {}) {
+async function run(env, script, exchange, { initOnly = false, source = 'tx', type = '128k', clockStep = 0 } = {}) {
   const context = vm.createContext({});
+  let clock = 0;
+  if (clockStep) vm.runInContext('globalThis.fixtureClock = 0; Date.now = () => fixtureClock; void 0;', context);
   const make = vm.runInContext(prelude, context, {timeout: 2000});
   const parameters = {env, info: {name: 'contract fixture'}, event: initOnly ? null : {
     source, action: 'musicUrl', info: {type, musicInfo: {source, songmid: 'fixture'}},
@@ -15,9 +17,10 @@ async function run(env, script, exchange, { initOnly = false, source = 'tx', typ
   const step = make(parameters, script);
   vm.runInContext(script, context, {timeout: 2000});
   let answer;
+  let dispatched = false;
   const active = new Set();
   const ready = [];
-  for (let actions = 0; actions < 150; actions++) {
+  for (let actions = 0; actions < 500; actions++) {
     await drainJobs();
     const message = step(answer);
     answer = undefined;
@@ -25,9 +28,13 @@ async function run(env, script, exchange, { initOnly = false, source = 'tx', typ
       assert.equal(active.size, 0);
       return JSON.parse(message.slice(1));
     }
-    if (message.startsWith('Q')) {
+    if (message === 'S') {
+      assert.ok(!initOnly && !dispatched);
+      dispatched = true;
+    } else if (message.startsWith('Q')) {
+      assert.ok(dispatched);
       const {id, ...request} = JSON.parse(message.slice(1));
-      assert.ok(Number.isInteger(id) && !active.has(id) && active.size < 2);
+      assert.ok(Number.isInteger(id) && !active.has(id) && active.size < 64);
       active.add(id);
       Promise.resolve(exchange(request, id)).then(reply => {
         if (active.has(id) && !reply.pending) ready.push({id, ...reply});
@@ -41,7 +48,8 @@ async function run(env, script, exchange, { initOnly = false, source = 'tx', typ
       await exchange('cancel', id);
       answer = '{"pending":true}';
     } else if (message === 'P' || message === 'W') {
-      await delay(2);
+      if (clockStep) vm.runInContext('globalThis.fixtureClock = ' + (clock += clockStep), context);
+      else await delay(2);
       if (message === 'P') {
         assert.ok(active.size);
         const reply = ready.shift();
@@ -229,7 +237,7 @@ for (const env of ['desktop', 'mobile']) {
     return id === 2 ? response('https://media.example.test/win.mp3') : {pending:true};
   });
   assert.equal(won.url,'https://media.example.test/win.mp3');
-  assert.deepEqual(calls,['start:1','start:2','cancel:1']);
+  assert.deepEqual(calls,['start:1','start:2','start:3','cancel:1','cancel:3']);
 }
 // LX captures request arguments when the script calls it, not when a host slot
 // opens. One script may reuse the same options for a batch of candidates.
@@ -290,13 +298,39 @@ for (const env of ['mobile', 'desktop']) {
     () => assert.fail('Oversized public request reached the broker'));
   assert.deepEqual(tooLarge, {error:'script'});
 
+  // A full IPC window is backpressure, not 64 lifetime calls. The extra
+  // request waits for a free slot. Only live IDs are cancelled on success.
+  const started = [];
+  const cancelled = [];
+  const burst = await run(env, initialize + `
+    lx.on('request', () => new Promise(resolve => {
+      for (let i = 1; i <= 65; i++) {
+        lx.request('https://api.example.test/' + i, {}, (_, resp) => {
+          if (i === 65) resolve(resp.body);
+        });
+      }
+    }));`, (req, id) => {
+    if (req === 'cancel') { cancelled.push(id); return; }
+    started.push(id);
+    return id === 1 || id === 65 ? response('https://media.example.test/burst') : {pending:true};
+  });
+  assert.equal(burst.url, 'https://media.example.test/burst');
+  assert.deepEqual(started, Array.from({length:65}, (_, i) => i + 1));
+  assert.deepEqual(cancelled, started.slice(1, -1));
+
+  const delayed = await run(env, initialize + `
+    lx.on('request', () => new Promise(resolve => setTimeout(() =>
+      resolve('https://media.example.test/' + Date.now()), 10000)));`,
+    () => assert.fail('Timer-only fixture must stay offline'), {clockStep:1000});
+  assert.equal(delayed.url, 'https://media.example.test/10000');
+
   // A 200 callback is not itself a successful musicUrl. The same script may
   // try another candidate without changing song, channel, or requested quality.
-  for (const winner of [0, 3, 4]) {
+  for (const winner of [0, 3, 4, 6, 13]) {
     let issued = 0;
     const result = await run(env, initialize + `
       lx.on('request', async ({source, info}) => {
-        for (let n = 1; n <= 4; n++) {
+        for (let n = 1; n <= 13; n++) {
           const opts = n <= 2 ? {} : {method:'POST', body:{source, rid:info.musicInfo.songmid, level:info.type}};
           const url = await new Promise(resolve => lx.request('https://api.example.test/' + n, opts,
             (err, resp, body) => resolve(!err && resp.statusCode === 200 && resp.body === body && body?.data?.url)));
@@ -309,7 +343,7 @@ for (const env of ['mobile', 'desktop']) {
       assert.deepEqual(options.body, {source:'tx', rid:'fixture', level:'128k'});
       return response(id === winner ? {data:{url:'https://media.example.test/winner.mp3'}} : {code:'unavailable'});
     });
-    assert.equal(issued, winner || 4);
+    assert.equal(issued, winner || 13);
     assert.deepEqual(result, winner ? {url:'https://media.example.test/winner.mp3'} : {error:'unavailable'});
   }
 }

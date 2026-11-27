@@ -8,6 +8,7 @@ import '../diagnostics/diagnostic_recorder.dart';
 import '../online/domain/music_source_registry.dart';
 import '../online/domain/online_error.dart';
 import '../online/domain/playback_source.dart';
+import '../online/lx/lx_ordered_source.dart';
 import '../online/qq/qq_track.dart';
 import 'download_destination.dart';
 import 'download_directory_store.dart';
@@ -29,11 +30,13 @@ final class DownloadTask {
     this.sourceId,
     this.quality,
     this._directory,
+    this._scriptOrder,
   );
   final int _id;
   int _attempt = 0;
   final QqTrack track;
   final String sourceId;
+  List<String> _scriptOrder;
   final OnlineQuality quality;
   DownloadDirectory _directory;
   DownloadDirectory get directory => _directory;
@@ -60,8 +63,10 @@ final class DownloadController extends ChangeNotifier {
     required this.destination,
     this.diagnostics,
     this.directoryStore,
+    this.currentScriptOrder,
   });
   final DownloadDirectoryStore? directoryStore;
+  final List<String> Function()? currentScriptOrder;
   // A saved directory can be on a removable drive, network share or cloud
   // provider. Don't touch it just because the user opened the music player.
   late final Future<void> directoryReady = _restoreDirectory();
@@ -140,8 +145,9 @@ final class DownloadController extends ChangeNotifier {
   Future<void> start(
     QqTrack track,
     String sourceId,
-    OnlineQuality quality,
-  ) async {
+    OnlineQuality quality, {
+    List<String> scriptOrder = const [],
+  }) async {
     if (_closed || busy || _picking) return;
     await directoryReady;
     if (_closed || busy || choosing) return;
@@ -151,7 +157,14 @@ final class DownloadController extends ChangeNotifier {
       _notify();
       return;
     }
-    final task = DownloadTask._(++_nextTask, track, sourceId, quality, target);
+    final task = DownloadTask._(
+      ++_nextTask,
+      track,
+      sourceId,
+      quality,
+      target,
+      List.unmodifiable(scriptOrder),
+    );
     _tasks.insert(0, task);
     if (_tasks.length > 50) _tasks.removeLast();
     return _begin(task);
@@ -173,6 +186,9 @@ final class DownloadController extends ChangeNotifier {
       return Future.value();
     }
     task._directory = target;
+    if (task.sourceId == lxOrderedSourceId && currentScriptOrder != null) {
+      task._scriptOrder = List.unmodifiable(currentScriptOrder!());
+    }
     task._status = DownloadStatus.resolving;
     task._received = 0;
     task._total = null;
@@ -234,6 +250,7 @@ final class DownloadController extends ChangeNotifier {
         task.sourceId,
         task.track,
         task.quality,
+        scriptOrder: task._scriptOrder,
         cancellation: work,
         trace: trace,
         write: (bytes) async {

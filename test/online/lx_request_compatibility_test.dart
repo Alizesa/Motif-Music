@@ -17,12 +17,33 @@ LxApiRequest request([Map<String, Object?> options = const {}]) =>
     });
 
 void main() {
-  test('a response beyond the old three-second cap completes within the bounded request budget', () async {
+  test('LX Mobile API timeout is 13s by default and honors up to 60s', () {
+    for (final (input, ms) in <(Object?, int)>[
+      (null, 13000),
+      (0, 13000),
+      (-1, 13000),
+      ('12000', 13000),
+      (1200, 1200),
+      (10000, 10000),
+      (12000, 12000),
+      (60000, 60000),
+      (90000, 60000),
+    ]) {
+      expect(request({'timeout': input}).timeout.inMilliseconds, ms);
+    }
+    expect(
+      lxWireTimeout,
+      const Duration(seconds: 6),
+      reason: 'non-script media/catalog unchanged',
+    );
+  });
+
+  test('a response beyond the old six-second cap completes within the bounded request budget', () async {
     final body = _Body(utf8.encode('ok'));
     final transport = LxHttpsTransport(
       open: (_, _, _, _, scope) async {
         await scope.until(
-          Future<void>.delayed(const Duration(milliseconds: 3200)),
+          Future<void>.delayed(const Duration(milliseconds: 6200)),
         );
         return (
           status: 200,
@@ -277,7 +298,7 @@ void main() {
     expect(base64Decode(result['_rawBase64'] as String), body.bytes);
   });
 
-  test('mobile redirects share the budget, upgrade HTTP and do not forward source keys to another host', () async {
+  test('mobile redirects upgrade HTTP and do not forward source keys to another host', () async {
     final calls = <(Uri, String, Map<String, String>, Uint8List?)>[];
     final bodies = <_Body>[];
     var redirects = 0;
@@ -322,39 +343,38 @@ void main() {
     expect(bodies.every((body) => body.closed), isTrue);
   });
 
-  test('redirects to a private literal or exhausted quota stop before the next dial', () async {
-    for (final location in ['https://127.0.0.1/track', '/repeat']) {
-      var calls = 0;
-      final body = _Body([]);
-      final parsed = LxApiRequest.parse(
-        {
+  test(
+    'private redirect targets and redirect loops are still bounded per request',
+    () async {
+      for (final location in ['https://127.0.0.1/track', '/repeat']) {
+        var calls = 0;
+        final body = _Body([]);
+        final parsed = LxApiRequest.parse({
           'url': 'https://api.example.test/start',
           'options': <String, Object?>{},
-        },
-        onRedirect: () =>
-            throw const LxRequestException(LxRequestFailure.budget),
-      );
-      final transport = LxHttpsTransport(
-        open: (_, _, _, _, _) async {
-          calls++;
-          return (
-            status: 302,
-            reason: 'Fixture',
-            headers: {
-              'location': [location],
-            },
-            body: body,
-          );
-        },
-      );
-      await expectLater(
-        transport.api(parsed, PcmCancellation()),
-        throwsA(isA<LxRequestException>()),
-      );
-      expect(calls, 1);
-      expect(body.closed, isTrue);
-    }
-  });
+        });
+        final transport = LxHttpsTransport(
+          open: (_, _, _, _, _) async {
+            calls++;
+            return (
+              status: 302,
+              reason: 'Fixture',
+              headers: {
+                'location': [location],
+              },
+              body: body,
+            );
+          },
+        );
+        await expectLater(
+          transport.api(parsed, PcmCancellation()),
+          throwsA(isA<LxRequestException>()),
+        );
+        expect(calls, location == '/repeat' ? 4 : 1);
+        expect(body.closed, isTrue);
+      }
+    },
+  );
 
   test('desktop can preserve a redirect response for the script', () async {
     var calls = 0;

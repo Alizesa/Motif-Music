@@ -10,6 +10,7 @@ import '../domain/online_error.dart';
 import '../domain/playback_source.dart';
 import '../qq/qq_track.dart';
 import 'lx_music_platform.dart';
+import 'lx_audio_check.dart';
 import 'lx_native_worker.dart';
 import 'lx_network.dart';
 import 'lx_platform_catalog.dart';
@@ -51,12 +52,13 @@ final class LxAddressResolver {
   final LxPublicDetail? publicDetail;
   final LxPlatformCatalog catalog;
 
-  Future<Uri> resolve(
+  Future<({Uri uri, int? durationMs})> resolve(
     QqTrack track,
     OnlineQuality quality,
     PcmCancellation work,
-    DiagnosticTrace? trace,
-  ) async {
+    DiagnosticTrace? trace, {
+    LxPlatform? onlyPlatform,
+  }) async {
     if (!source.qualities.contains(quality)) {
       throw const OnlineException(OnlineErrorKind.unsupportedQuality);
     }
@@ -69,14 +71,16 @@ final class LxAddressResolver {
       scope.check();
       final prepared = await _prepareTrack(track, quality, scope, trace);
       scope.check();
+      if (onlyPlatform != null && (prepared.durationMs ?? 0) <= 0) {
+        throw const LxAudioCheckFailure.missingTrackDuration();
+      }
       final script = await store.read(source);
       scope.check();
-      final quota = _LxApiQuota();
       OnlineException? firstFailure;
-      for (final platform in LxPlatform.values) {
+      for (final platform
+          in onlyPlatform == null ? LxPlatform.values : [onlyPlatform]) {
         if (!source.supports(platform, quality)) continue;
         scope.check();
-        if (quota.full) throw const LxRequestException(LxRequestFailure.budget);
         try {
           Map<String, Object?>? music;
           if (platform == LxPlatform.tx) {
@@ -117,15 +121,15 @@ final class LxAddressResolver {
             });
             if (music == null) continue;
           }
-          return await _scriptAddress(
+          final uri = await _scriptAddress(
             script,
             platform,
             music,
             quality,
-            quota,
             scope,
             trace,
           );
+          return (uri: uri, durationMs: prepared.durationMs);
         } on OnlineException catch (error) {
           scope.check();
           if (!const {
@@ -158,11 +162,10 @@ final class LxAddressResolver {
     LxPlatform platform,
     Map<String, Object?> music,
     OnlineQuality quality,
-    _LxApiQuota quota,
     PcmCancellation work,
     DiagnosticTrace? trace,
   ) async {
-    final broker = _LxRequestBudget(fetch, trace, quota);
+    final broker = _LxRequestBroker(fetch, trace);
     trace?.record(DiagnosticEvent.lxScript, {
       DiagnosticField.platform: platform,
       DiagnosticField.state: DiagnosticResult.started,
@@ -214,12 +217,11 @@ final class LxAddressResolver {
     if (result.containsKey('url')) {
       throw const LxRequestException(LxRequestFailure.mediaAddress);
     }
-    if (quota.full) throw const LxRequestException(LxRequestFailure.budget);
-    if (!broker.admitted && broker.denied != null) throw broker.denied!;
-    if (broker.lastTransportFailure case final failure?) throw failure;
     if (result['error'] == 'timeout') {
       throw const LxRequestException(LxRequestFailure.scriptTimeout);
     }
+    if (!broker.admitted && broker.denied != null) throw broker.denied!;
+    if (broker.lastTransportFailure case final failure?) throw failure;
     throw OnlineException(switch (result['error']) {
       'unsupported' => OnlineErrorKind.unsupported,
       'unavailable' => OnlineErrorKind.unavailable,
@@ -325,18 +327,45 @@ _ScriptFailure _scriptFailure(Object? raw) =>
     _ScriptFailure.values.where((v) => v.name == raw).firstOrNull ??
     _ScriptFailure.unknown;
 
-final class _LxApiQuota {
-  int used = 0;
-  bool get full => used >= 4;
-  void take() {
-    if (full) throw const LxRequestException(LxRequestFailure.budget);
-    used++;
+// Like Android's HTTP dispatcher, queue excess work for an origin instead of
+// failing the script's next candidate. The exchange separately bounds total
+// live frames. A transferred slot belongs to its waiter until it unwinds.
+final class _OriginSlots {
+  int running = 0;
+  final _waiting = <Completer<void>>{};
+
+  Future<void> acquire(PcmCancellation scope) async {
+    if (running < 5) {
+      running++;
+      return;
+    }
+    final turn = Completer<void>();
+    _waiting.add(turn);
+    final unlink = scope.listen(() {
+      if (_waiting.remove(turn)) turn.completeError(const PcmCancelled());
+    });
+    try {
+      await turn.future;
+    } finally {
+      unlink();
+    }
+  }
+
+  void release() {
+    if (_waiting.isEmpty) {
+      running--;
+    } else {
+      final next = _waiting.first;
+      _waiting.remove(next);
+      next.complete();
+    }
   }
 }
 
-final class _LxRequestBudget {
-  _LxRequestBudget(this.fetch, this.trace, this.quota);
-  final _LxApiQuota quota;
+final class _LxRequestBroker {
+  _LxRequestBroker(this.fetch, this.trace);
+  final _origins = <String, _OriginSlots>{};
+  int _inFlight = 0;
   final LxFetch fetch;
   final DiagnosticTrace? trace;
   bool admitted = false;
@@ -378,10 +407,10 @@ final class _LxRequestBudget {
     cancellation.check();
     if (_closed) throw const PcmCancelled();
     final candidate = ++_candidates;
-    if (quota.full || terminal != null) {
+    if (terminal case final failure?) {
       trace?.record(DiagnosticEvent.lxApiFailure, {
         DiagnosticField.candidate: candidate,
-        DiagnosticField.reason: terminal?.kind ?? LxRequestFailure.budget,
+        DiagnosticField.reason: failure.kind,
       });
       return refused;
     }
@@ -399,26 +428,42 @@ final class _LxRequestBudget {
     final io = PcmCancellation();
     final detach = cancellation.listen(io.cancel);
     _active.add(io);
+    _OriginSlots? slots;
+    var acquired = false;
+    var expired = false;
+    Timer? deadline;
     try {
       final request = LxApiRequest.parse(
         message,
         onRedirect: () {
           io.check();
-          quota.take();
           redirects++;
         },
       );
-      quota.take();
+      // The LX request clock includes time spent waiting for this origin.
+      deadline = Timer(request.timeout, () {
+        expired = true;
+        io.cancel();
+      });
+      slots = _origins.putIfAbsent(uri.host, _OriginSlots.new);
+      await slots.acquire(io);
+      acquired = true;
+      _inFlight++;
+      io.check();
       admitted = true;
       if (trace?.active == true) {
         trace!.record(DiagnosticEvent.lxApiStart, {
           DiagnosticField.candidate: candidate,
-          DiagnosticField.inFlight: _active.length,
+          DiagnosticField.inFlight: _inFlight,
           DiagnosticField.timeoutMs: request.timeout.inMilliseconds,
         });
       }
-      final response = await fetch(request, io);
-      io.check();
+      final Map<String, Object?> response;
+      try {
+        response = await fetch(request, io);
+      } finally {
+        io.check();
+      }
       // Deliver upstream HTTP status to the callback, but do not let an
       // access refusal/rate limit cause more requests or platform rotation.
       switch (response['statusCode']) {
@@ -440,13 +485,21 @@ final class _LxRequestBudget {
       }
       _observe(candidate, null);
       // Reserve room for the exchange's one-use numeric ID in the same frame.
-      if (utf8.encode(jsonEncode({...result, 'id': lxScriptCallLimit})).length >
+      if (utf8
+              .encode(jsonEncode({...result, 'id': lxScriptExchangeLimit}))
+              .length >
           lxMessageLimit) {
         _stop(const OnlineException(OnlineErrorKind.malformedResponse), io);
         return refused;
       }
       return result;
     } on PcmCancelled catch (error) {
+      if (expired && !cancellation.cancelled && !_closed && terminal == null) {
+        const failure = LxRequestException(LxRequestFailure.timeout);
+        _recordFailure(candidate, failure, watch);
+        _observe(candidate, failure);
+        return refused;
+      }
       _recordFailure(candidate, error, watch);
       rethrow;
     } on OnlineException catch (error) {
@@ -476,6 +529,12 @@ final class _LxRequestBudget {
       _stop(const OnlineException(OnlineErrorKind.malformedResponse), io);
       return refused;
     } finally {
+      deadline?.cancel();
+      if (acquired) {
+        _inFlight--;
+        slots!.release();
+        if (slots.running == 0) _origins.remove(uri.host);
+      }
       _active.remove(io);
       detach();
       io.cancel();

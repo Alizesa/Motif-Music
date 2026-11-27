@@ -362,10 +362,109 @@ void main() {
                 as List;
         final starts = events.where((r) => r['event'] == 'lxApiStart');
         expect(starts.map((r) => r['inFlight']), [1, 2]);
-        expect(starts.map((r) => r['timeoutMs']), [6000, 6000]);
+        expect(starts.map((r) => r['timeoutMs']), [13000, 13000]);
       },
     );
   }
+
+  test(
+    'saturated host queues independently; timeout or cancellation never dials',
+    () async {
+      await install();
+      final firstFive = Completer<void>();
+      final release = Completer<void>();
+      final seen = <String>[];
+      apiReply = (req, scope) async {
+        seen.add(req.uri.path);
+        if (seen.length == 5) firstFive.complete();
+        if (req.uri.path.startsWith('/hold')) await scope.until(release.future);
+        return {'statusCode': 200};
+      };
+      reply = (_, send, work) async {
+        Future<Map<String, Object?>> ask(
+          String url, {
+          PcmCancellation? owner,
+          int? timeout,
+        }) => send({
+          'url': url,
+          'options': {'timeout': ?timeout},
+        }, owner ?? work);
+        const a = 'https://api.example.test';
+        final held = [for (var i = 0; i < 5; i++) ask('$a/hold$i')];
+        await firstFive.future;
+        final queued = ask('$a/next');
+        final cancel = PcmCancellation();
+        final revoked = expectLater(
+          ask('$a/cancel', owner: cancel),
+          throwsA(isA<PcmCancelled>()),
+        );
+        cancel.cancel();
+        final expired = ask('$a/short', timeout: 15);
+        expect(
+          await ask('https://other.example.test/other'),
+          contains('response'),
+        );
+        await revoked;
+        expect(await expired, {'error': 'denied'});
+        expect(seen, [
+          '/hold0',
+          '/hold1',
+          '/hold2',
+          '/hold3',
+          '/hold4',
+          '/other',
+        ]);
+        release.complete();
+        await Future.wait(held);
+        expect(await queued, contains('response'));
+        expect(seen.last, '/next');
+        return {'url': _url};
+      };
+      expect(await download(), 'flac');
+      expect(fetches, 7);
+    },
+  );
+
+  test(
+    'HTTP 429 cancels the five active or queued peers before a slot reopens',
+    () async {
+      await install();
+      final five = Completer<void>();
+      apiReply = (_, scope) async {
+        final index = fetches;
+        if (index == 5) five.complete();
+        if (index == 1) {
+          await five.future;
+          return {'statusCode': 429};
+        }
+        return scope.until(Completer<Map<String, Object?>>().future);
+      };
+      reply = (_, send, work) async {
+        await Future.wait(
+          List.generate(6, (_) async {
+            try {
+              await request(send, work);
+            } on PcmCancelled {
+              /* peer retired */
+            }
+          }),
+        );
+        return {'url': _url};
+      };
+      await expectLater(
+        download(),
+        throwsA(
+          isA<OnlineException>().having(
+            (e) => e.kind,
+            'kind',
+            OnlineErrorKind.rateLimited,
+          ),
+        ),
+      );
+      expect(fetches, 5);
+      expect(attempts, ['tx']);
+    },
+  );
 
   for (final secondWins in [true, false]) {
     test(
@@ -415,7 +514,7 @@ void main() {
     );
   }
 
-  test('overlapping redirects spend the same four-hop allowance and cannot reset it by switching', () async {
+  test('two calls may follow their own redirects without spending the next candidate', () async {
     await install();
     final both = Completer<void>();
     int hops = 0;
@@ -431,28 +530,11 @@ void main() {
       return {'statusCode': 200};
     };
     reply = (_, send, work) async {
-      Future<void> one() async {
-        try {
-          await request(send, work);
-        } on PcmCancelled {
-          /* peer was stopped */
-        }
-      }
-
-      await Future.wait([one(), one()]);
+      await Future.wait([request(send, work), request(send, work)]);
       return {'url': _url};
     };
-    await expectLater(
-      play(fallback: 'qq'),
-      throwsA(
-        isA<LxRequestException>().having(
-          (e) => e.reason,
-          'reason',
-          LxRequestFailure.budget,
-        ),
-      ),
-    );
-    expect(hops, 4);
+    expect(await download(), 'flac');
+    expect(hops, 6);
     expect(attempts, ['tx']);
     expect(qq.calls, isEmpty);
     expect(wire.requests, isEmpty);
@@ -519,26 +601,17 @@ void main() {
     },
   );
   test(
-    'four total script API admissions across platforms, not four per channel',
+    'fifth and later candidates can resolve on the same or a matched platform',
     () async {
       await install();
       reply = (p, send, work) async {
-        for (var i = 0; i < 3; i++) {
-          await request(send, work);
+        for (var i = 0; i < 7; i++) {
+          expect(await request(send, work), contains('response'));
         }
-        return {'error': 'unavailable'};
+        return p == 'tx' ? {'error': 'unavailable'} : {'url': _url};
       };
-      await expectLater(
-        play(fallback: 'qq'),
-        throwsA(
-          isA<LxRequestException>().having(
-            (e) => e.reason,
-            'reason',
-            LxRequestFailure.budget,
-          ),
-        ),
-      );
-      expect(fetches, 4);
+      expect(await download(), 'flac');
+      expect(fetches, 14);
       expect(attempts, ['tx', 'kw']);
       expect(wire.queries, [LxPlatform.kw]);
       expect(qq.calls, isEmpty);

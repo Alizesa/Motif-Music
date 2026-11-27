@@ -185,7 +185,7 @@ void main() {
               }, cancellation);
               expect(
                 next.containsKey('response'),
-                i < 4 && !blocked && transportFailure == null,
+                !blocked && transportFailure == null,
               );
               if (useLastCandidate) response = next;
             }
@@ -749,9 +749,10 @@ void main() {
     expect(utf8.decode(form.body!), 'title=a%2Bb&empty=');
   });
 
-  test('new API and media hosts work without a saved domain list, with a bounded budget', () async {
+  test('the sixth candidate works without a saved domain list or a four-request cutoff', () async {
     final id = await enable();
-    requestAttempts = 5;
+    requestAttempts = 6;
+    useLastCandidate = true;
     mediaUrl = 'https://new-cdn.example.test/song.wav';
     final stream = await registry.resolve(
       track,
@@ -763,6 +764,8 @@ void main() {
       'candidate1.example.test',
       'candidate2.example.test',
       'candidate3.example.test',
+      'candidate4.example.test',
+      'candidate5.example.test',
     ]);
     expect(opened.single.host, 'new-cdn.example.test');
     expect(catalogRequests, [

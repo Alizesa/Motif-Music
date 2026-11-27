@@ -15,8 +15,79 @@ import 'package:motif/online/domain/playback_source.dart';
 import 'package:motif/online/qq/qq_track.dart';
 
 import '../online/playback_fakes.dart';
+import '../support/ordered_script_stub.dart';
+
+import 'package:motif/online/lx/lx_ordered_source.dart';
 
 void main() {
+  testWidgets(
+    'ordered sheet requires an explicit supported tier; retry uses current checked order in the same task',
+    (t) async {
+      final sources = MusicSourceRegistry(qq: FakePlaybackSource('qq'));
+      final a = OrderedScriptStub('A')..unavailable = true;
+      final b = OrderedScriptStub('B');
+      for (final source in [a, b]) {
+        sources.registerManaged(
+          MusicSourceRegistration(name: source.sourceId, resolver: source),
+        );
+      }
+      final destination = _Destination();
+      final controller = DownloadController(
+        sources: sources,
+        destination: destination,
+        currentScriptOrder: () => ['B'],
+      );
+      await controller.chooseDirectory();
+      addTearDown(controller.dispose);
+      await t.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) => Scaffold(
+              body: TextButton(
+                onPressed: () => unawaited(
+                  showTrackDownloadSheet(
+                    ctx,
+                    controller: controller,
+                    track: playbackTrack(1),
+                    preferredSourceId: lxOrderedSourceId,
+                    scriptOrder: ['A'],
+                    quality: OnlineQuality.lossless,
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await t.tap(find.text('Open'));
+      await t.pumpAndSettle();
+      final start = find.widgetWithText(FilledButton, '开始下载');
+      expect(t.widget<FilledButton>(start).onPressed, isNull);
+      expect(find.textContaining('没有支持当前音质'), findsOneWidget);
+      final quality = t.widget<DropdownButtonFormField<OnlineQuality>>(
+        find.byType(DropdownButtonFormField<OnlineQuality>),
+      );
+      quality.onChanged!(OnlineQuality.high);
+      await t.pumpAndSettle();
+      await t.tap(start);
+      await t.pumpAndSettle();
+      final task = controller.tasks.single;
+      expect(task.status, DownloadStatus.failed);
+      expect(task.received, 0);
+      expect(a.transfers, 1);
+      expect(b.transfers, 0);
+      await controller.retry(task);
+      expect(task.status, DownloadStatus.completed);
+      expect(task.quality, OnlineQuality.high);
+      expect(task.received, 4);
+      expect(controller.tasks, [same(task)]);
+      expect(a.transfers, 1);
+      expect(b.transfers, 1);
+      expect(destination.aborted, 1);
+    },
+  );
+
   testWidgets(
     'opening the sheet restores the remembered folder; a second song needs no picker',
     (tester) async {

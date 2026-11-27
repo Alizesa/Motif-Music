@@ -10,8 +10,7 @@ import 'lx_request_error.dart';
 import 'lx_script_exchange.dart';
 import 'fixture/lx_fixture_runtime.dart';
 
-export 'lx_script_exchange.dart'
-    show lxMessageLimit, lxScriptExchangeLimit, lxScriptCallLimit;
+export 'lx_script_exchange.dart' show lxMessageLimit, lxScriptExchangeLimit;
 
 const lxScriptLimit = 768 * 1024;
 const lxWorkerTimeout = Duration(seconds: 34);

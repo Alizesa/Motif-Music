@@ -34,13 +34,14 @@ Future<LxWireResponse> openLxHttps(
   String method,
   Map<String, String> headers,
   Uint8List? payload,
-  PcmCancellation cancellation,
-) async {
+  PcmCancellation cancellation, {
+  Duration timeout = lxWireTimeout,
+}) async {
   final stopping = PcmCancellation();
   final unlisten = cancellation.listen(stopping.cancel);
   var timedOut = false;
   var phase = LxRequestFailure.dns;
-  final budget = Timer(lxWireTimeout, () {
+  final budget = Timer(timeout, () {
     timedOut = true;
     stopping.cancel();
   });
@@ -88,7 +89,7 @@ Future<LxWireResponse> openLxHttps(
         unawaited(secure.close());
         stopping.check();
       }
-      body = LxSocketBody(secure, stopping, unlisten);
+      body = LxSocketBody(secure, stopping, unlisten, timeout);
       phase = LxRequestFailure.response;
       final path = uri.path.isEmpty ? '/' : uri.path;
       final target = uri.hasQuery ? '$path?${uri.query}' : path;
@@ -202,11 +203,12 @@ typedef _Headers = ({
 
 // Read HTTP/1.1 headers and raw body bytes with backpressure.
 final class LxSocketBody implements LxWireBody {
-  LxSocketBody(this._socket, this._scope, this._unlisten)
+  LxSocketBody(this._socket, this._scope, this._unlisten, this._readTimeout)
     : _events = StreamIterator(_socket) {
     _removeCancel = _scope.listen(close);
   }
 
+  final Duration _readTimeout;
   final RawSecureSocket _socket;
   final PcmCancellation _scope;
   final void Function() _unlisten;
@@ -270,7 +272,7 @@ final class LxSocketBody implements LxWireBody {
       _remaining = Uint8List.sublistView(_remaining, amount);
       return bytes;
     }
-    final timer = Timer(lxWireTimeout, _scope.cancel);
+    final timer = Timer(_readTimeout, _scope.cancel);
     try {
       return await _receive(maximum);
     } on PcmCancelled {
